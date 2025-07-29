@@ -383,10 +383,27 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	log.Printf("🔔 Processing incoming call %s from %s", callID, callerNumber)
 	log.Printf("📋 Call flow: 1) Create PeerConnection → 2) Set SDP → 3) Pre-accept → 4) Accept → 5) Media flow")
 	
+	// Check if call is already being processed
+	b.mu.Lock()
+	if _, exists := b.activeCalls[callID]; exists {
+		b.mu.Unlock()
+		log.Printf("⚠️ Call %s already being processed, ignoring duplicate", callID)
+		return
+	}
+	// Reserve this call ID immediately to prevent race conditions
+	b.activeCalls[callID] = &Call{
+		ID:        callID,
+		StartTime: time.Now(),
+	}
+	b.mu.Unlock()
+	
 	// Create a new PeerConnection
 	pc, err := b.api.NewPeerConnection(b.config)
 	if err != nil {
 		log.Printf("❌ Failed to create peer connection: %v", err)
+		b.mu.Lock()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
 		return
 	}
 	
@@ -447,12 +464,10 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Store the call
+	// Update the call with peer connection
 	b.mu.Lock()
-	b.activeCalls[callID] = &Call{
-		ID:             callID,
-		PeerConnection: pc,
-		StartTime:      time.Now(),
+	if call, exists := b.activeCalls[callID]; exists {
+		call.PeerConnection = pc
 	}
 	b.mu.Unlock()
 	
