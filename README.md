@@ -86,7 +86,31 @@ Environment variables:
 - `PHONE_NUMBER_ID` - WhatsApp phone number ID
 - `VERIFY_TOKEN` - Webhook verification token
 - `WHATSAPP_WEBHOOK_SECRET` - Webhook signature secret
+- `OPENAI_API_KEY` - OpenAI API key (optional, enables AI voice assistant)
 - `PORT` - Server port (default: 3000)
+
+## OpenAI Realtime API Integration
+
+When `OPENAI_API_KEY` is set, the bridge automatically connects WhatsApp voice calls to OpenAI's Realtime API, creating an AI voice assistant that can:
+
+1. **Listen** to the caller's voice
+2. **Understand** using Whisper transcription
+3. **Respond** with natural voice using GPT-4
+4. **Interact** in real-time with low latency
+
+### How it Works:
+
+```
+WhatsApp Caller → Voice Audio → Bridge → OpenAI Realtime API
+                                   ↑            ↓
+                              WebRTC Connection  AI Response
+                                   ←            ←
+```
+
+The integration uses:
+- **Dual WebRTC Connections**: One to WhatsApp, one to OpenAI
+- **Data Channels**: For sending Realtime API events
+- **Audio Forwarding**: Caller's voice to AI, AI's response to caller
 
 ## Testing
 

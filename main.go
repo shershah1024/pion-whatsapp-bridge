@@ -40,10 +40,11 @@ type WhatsAppBridge struct {
 
 // Call represents an active WhatsApp call session
 type Call struct {
-	ID           string
+	ID             string
 	PeerConnection *webrtc.PeerConnection
-	AudioTrack   *webrtc.TrackLocalStaticRTP
-	StartTime    time.Time
+	AudioTrack     *webrtc.TrackLocalStaticRTP
+	StartTime      time.Time
+	OpenAIClient   *OpenAIRealtimeClient
 }
 
 // NewWhatsAppBridge creates a new bridge instance
@@ -132,6 +133,9 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 func (b *WhatsAppBridge) Start() {
 	router := mux.NewRouter()
 	
+	// Add logging middleware
+	router.Use(b.loggingMiddleware)
+	
 	// WhatsApp webhook endpoints
 	router.HandleFunc("/whatsapp-call", b.handleWebhookVerification).Methods("GET")
 	router.HandleFunc("/whatsapp-call", b.handleWebhookEvent).Methods("POST")
@@ -152,10 +156,22 @@ func (b *WhatsAppBridge) Start() {
 	log.Printf("📡 Webhook endpoint: /whatsapp-call")
 	log.Printf("🧪 Test endpoint: /test-call")
 	log.Printf("📊 Status endpoint: /status")
+	log.Printf("🔐 Verify token configured: %v", b.verifyToken != "")
+	log.Printf("🔑 Access token configured: %v", b.accessToken != "")
+	log.Printf("📱 Phone number ID: %s", b.phoneNumberID)
 	
 	if err := http.ListenAndServe(":"+port, router); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// loggingMiddleware logs all incoming requests
+func (b *WhatsAppBridge) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("🌐 %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		log.Printf("📋 Headers: %v", r.Header)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // handleWebhookVerification handles WhatsApp webhook verification
@@ -178,15 +194,23 @@ func (b *WhatsAppBridge) handleWebhookVerification(w http.ResponseWriter, r *htt
 
 // handleWebhookEvent handles incoming WhatsApp webhook events
 func (b *WhatsAppBridge) handleWebhookEvent(w http.ResponseWriter, r *http.Request) {
+	log.Println("📨 POST /whatsapp-call webhook received")
+	
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("❌ Failed to read body: %v", err)
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}
 	
+	log.Printf("📦 Raw webhook body: %s", string(body))
+	
 	// Verify webhook signature if present
 	signature := r.Header.Get("X-Hub-Signature-256")
+	log.Printf("🔏 Signature present: %v", signature != "")
+	
 	if signature != "" && !b.verifySignature(body, signature) {
+		log.Println("❌ Webhook signature verification failed")
 		http.Error(w, "Invalid signature", http.StatusForbidden)
 		return
 	}
@@ -194,14 +218,21 @@ func (b *WhatsAppBridge) handleWebhookEvent(w http.ResponseWriter, r *http.Reque
 	// Parse webhook data
 	var webhook map[string]interface{}
 	if err := json.Unmarshal(body, &webhook); err != nil {
+		log.Printf("❌ Failed to parse JSON: %v", err)
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 	
-	log.Printf("📱 WhatsApp webhook received: %s", string(body))
+	// Log parsed webhook structure
+	prettyJSON, _ := json.MarshalIndent(webhook, "", "  ")
+	log.Printf("📱 WhatsApp webhook parsed:\n%s", string(prettyJSON))
 	
 	// Process the webhook
 	response := b.processWebhook(webhook)
+	
+	// Log response
+	responseJSON, _ := json.Marshal(response)
+	log.Printf("✉️ Sending response: %s", string(responseJSON))
 	
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -219,44 +250,73 @@ func (b *WhatsAppBridge) verifySignature(body []byte, signature string) bool {
 
 // processWebhook processes incoming webhook data
 func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) map[string]interface{} {
+	log.Println("🔍 Processing webhook data...")
+	
 	// Parse WhatsApp webhook structure
 	entry, ok := webhook["entry"].([]interface{})
 	if !ok || len(entry) == 0 {
+		log.Println("⚠️ No entry found in webhook")
 		return map[string]interface{}{"status": "ok", "message": "No entry found"}
 	}
+	
+	log.Printf("📊 Found %d entries", len(entry))
 	
 	// Get first entry
 	firstEntry, ok := entry[0].(map[string]interface{})
 	if !ok {
+		log.Println("⚠️ Invalid entry format")
 		return map[string]interface{}{"status": "ok", "message": "Invalid entry format"}
 	}
 	
 	// Get changes
 	changes, ok := firstEntry["changes"].([]interface{})
 	if !ok || len(changes) == 0 {
+		log.Println("⚠️ No changes found in entry")
 		return map[string]interface{}{"status": "ok", "message": "No changes found"}
 	}
 	
+	log.Printf("📊 Found %d changes", len(changes))
+	
 	// Process each change
-	for _, change := range changes {
+	for i, change := range changes {
+		log.Printf("🔄 Processing change %d", i+1)
+		
 		changeData, ok := change.(map[string]interface{})
 		if !ok {
+			log.Printf("⚠️ Invalid change format at index %d", i)
 			continue
 		}
 		
-		// Check if it's a calls field
-		if field, ok := changeData["field"].(string); ok && field == "calls" {
-			value, ok := changeData["value"].(map[string]interface{})
-			if !ok {
-				continue
-			}
+		// Log the field type
+		if field, ok := changeData["field"].(string); ok {
+			log.Printf("📌 Field type: %s", field)
 			
-			// Process call events
-			if calls, ok := value["calls"].([]interface{}); ok && len(calls) > 0 {
-				for _, call := range calls {
-					b.handleCallEvent(call.(map[string]interface{}))
+			// Check if it's a calls field
+			if field == "calls" {
+				log.Println("📞 Processing calls field")
+				value, ok := changeData["value"].(map[string]interface{})
+				if !ok {
+					log.Println("⚠️ Invalid value format for calls")
+					continue
 				}
+				
+				// Process call events
+				if calls, ok := value["calls"].([]interface{}); ok && len(calls) > 0 {
+					log.Printf("📞 Found %d call events", len(calls))
+					for _, call := range calls {
+						b.handleCallEvent(call.(map[string]interface{}))
+					}
+				} else {
+					log.Println("⚠️ No calls array found in value")
+				}
+			} else if field == "messages" {
+				log.Println("💬 Processing messages field")
+				// Handle regular messages if needed
+			} else {
+				log.Printf("🔸 Other field type: %s", field)
 			}
+		} else {
+			log.Println("⚠️ No field type found in change")
 		}
 	}
 	
@@ -394,9 +454,14 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	log.Printf("✅ Call accepted: %s from %s", callID, callerNumber)
 	
-	// Play a simple audio tone or message
-	// In a real implementation, you'd connect to your audio processing system here
-	go b.playWelcomeMessage(pc)
+	// Connect to OpenAI Realtime API if configured
+	openAIKey := os.Getenv("OPENAI_API_KEY")
+	if openAIKey != "" {
+		go b.connectToOpenAIRealtime(callID, pc, openAIKey)
+	} else {
+		// Play a simple audio tone or message
+		go b.playWelcomeMessage(pc)
+	}
 }
 
 // sendPreAcceptCall sends pre-accept to WhatsApp API
@@ -459,6 +524,61 @@ func (b *WhatsAppBridge) callWhatsAppAPI(action, callID, sdpAnswer string) error
 	
 	log.Printf("✅ WhatsApp API %s successful for call %s", action, callID)
 	return nil
+}
+
+// connectToOpenAIRealtime connects the WhatsApp call to OpenAI's Realtime API
+func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webrtc.PeerConnection, apiKey string) {
+	log.Printf("🤖 Connecting call %s to OpenAI Realtime API", callID)
+	
+	// Create OpenAI client
+	openAIClient := NewOpenAIRealtimeClient(apiKey)
+	
+	// Get ephemeral token
+	if err := openAIClient.GetEphemeralToken(); err != nil {
+		log.Printf("❌ Failed to get OpenAI token: %v", err)
+		return
+	}
+	
+	// Connect to OpenAI Realtime API
+	if err := openAIClient.ConnectToRealtimeAPI(b.api); err != nil {
+		log.Printf("❌ Failed to connect to OpenAI: %v", err)
+		return
+	}
+	
+	// Store OpenAI client in call
+	b.mu.Lock()
+	if call, exists := b.activeCalls[callID]; exists {
+		call.OpenAIClient = openAIClient
+	}
+	b.mu.Unlock()
+	
+	// Set up audio forwarding from WhatsApp to OpenAI
+	whatsappPC.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("🎤 Forwarding audio from WhatsApp to OpenAI")
+		
+		// Read RTP packets from WhatsApp
+		go func() {
+			buf := make([]byte, 1400)
+			for {
+				n, _, readErr := track.Read(buf)
+				if readErr != nil {
+					return
+				}
+				
+				// Forward audio to OpenAI
+				// Note: This would need proper RTP to PCM conversion
+				// For now, just log that we would forward
+				log.Printf("🔊 Would forward %d bytes to OpenAI", n)
+				
+				// In a real implementation:
+				// 1. Extract PCM audio from RTP packets
+				// 2. Convert to base64
+				// 3. Send to OpenAI via openAIClient.SendAudioToOpenAI()
+			}
+		}()
+	})
+	
+	log.Printf("✅ OpenAI Realtime connection established for call %s", callID)
 }
 
 // playWelcomeMessage plays a welcome message or tone
