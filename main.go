@@ -21,9 +21,9 @@ import (
 )
 
 const (
-	// WhatsApp webhook configuration
-	VERIFY_TOKEN   = "whatsapp_bridge_token"
-	WEBHOOK_SECRET = "your_webhook_secret" // Set via env var WHATSAPP_WEBHOOK_SECRET
+	// Default webhook configuration (overridden by env vars)
+	DEFAULT_VERIFY_TOKEN = "whatsapp_bridge_token"
+	DEFAULT_WEBHOOK_SECRET = "your_webhook_secret"
 )
 
 // WhatsAppBridge handles WhatsApp call bridging using Pion WebRTC
@@ -33,6 +33,7 @@ type WhatsAppBridge struct {
 	activeCalls   map[string]*Call
 	mu            sync.Mutex
 	webhookSecret string
+	verifyToken   string
 	accessToken   string
 	phoneNumberID string
 }
@@ -98,7 +99,12 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 	
 	webhookSecret := os.Getenv("WHATSAPP_WEBHOOK_SECRET")
 	if webhookSecret == "" {
-		webhookSecret = WEBHOOK_SECRET
+		webhookSecret = DEFAULT_WEBHOOK_SECRET
+	}
+	
+	verifyToken := os.Getenv("WHATSAPP_VERIFY_TOKEN")
+	if verifyToken == "" {
+		verifyToken = DEFAULT_VERIFY_TOKEN
 	}
 	
 	accessToken := os.Getenv("WHATSAPP_ACCESS_TOKEN")
@@ -116,6 +122,7 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 		config:        config,
 		activeCalls:   make(map[string]*Call),
 		webhookSecret: webhookSecret,
+		verifyToken:   verifyToken,
 		accessToken:   accessToken,
 		phoneNumberID: phoneNumberID,
 	}
@@ -157,7 +164,7 @@ func (b *WhatsAppBridge) handleWebhookVerification(w http.ResponseWriter, r *htt
 	token := r.URL.Query().Get("hub.verify_token")
 	challenge := r.URL.Query().Get("hub.challenge")
 	
-	if mode == "subscribe" && token == VERIFY_TOKEN {
+	if mode == "subscribe" && token == b.verifyToken {
 		log.Println("✅ WhatsApp webhook verified")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(challenge))
