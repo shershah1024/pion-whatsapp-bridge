@@ -366,9 +366,13 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 		// Handle call termination
 		b.mu.Lock()
 		if call, exists := b.activeCalls[callID]; exists {
-			call.PeerConnection.Close()
+			if call.PeerConnection != nil {
+				call.PeerConnection.Close()
+			}
 			delete(b.activeCalls, callID)
 			log.Printf("☎️ Call terminated: %s", callID)
+		} else {
+			log.Printf("☎️ Terminate event for unknown call: %s", callID)
 		}
 		b.mu.Unlock()
 		
@@ -554,7 +558,9 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		b.mu.Lock()
 		delete(b.activeCalls, callID)
 		b.mu.Unlock()
-		pc.Close()
+		if pc != nil {
+			pc.Close()
+		}
 		return
 	}
 	
@@ -594,14 +600,24 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		log.Printf("❌ Failed to create answer: %v", err)
-		pc.Close()
+		if pc != nil {
+			pc.Close()
+		}
+		b.mu.Lock()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
 		return
 	}
 	
 	// Set local description
 	if err := pc.SetLocalDescription(answer); err != nil {
 		log.Printf("❌ Failed to set local description: %v", err)
-		pc.Close()
+		if pc != nil {
+			pc.Close()
+		}
+		b.mu.Lock()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
 		return
 	}
 	
@@ -637,7 +653,9 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	if err := b.sendPreAcceptCall(callID, answer.SDP); err != nil {
 		log.Printf("❌ Failed to pre-accept call: %v", err)
 		b.mu.Lock()
-		pc.Close()
+		if pc != nil {
+			pc.Close()
+		}
 		delete(b.activeCalls, callID)
 		b.mu.Unlock()
 		return
@@ -659,7 +677,9 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	if err := b.sendAcceptCall(callID, answer.SDP); err != nil {
 		log.Printf("❌ Failed to accept call: %v", err)
 		b.mu.Lock()
-		pc.Close()
+		if pc != nil {
+			pc.Close()
+		}
 		delete(b.activeCalls, callID)
 		b.mu.Unlock()
 		return
@@ -932,7 +952,9 @@ func (b *WhatsAppBridge) processIncomingSDP(offerSDP string) (string, error) {
 		time.Sleep(5 * time.Minute)
 		b.mu.Lock()
 		if call, exists := b.activeCalls[callID]; exists {
-			call.PeerConnection.Close()
+			if call.PeerConnection != nil {
+				call.PeerConnection.Close()
+			}
 			delete(b.activeCalls, callID)
 		}
 		b.mu.Unlock()
