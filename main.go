@@ -49,10 +49,34 @@ type Call struct {
 
 // NewWhatsAppBridge creates a new bridge instance
 func NewWhatsAppBridge() *WhatsAppBridge {
-	// Create a MediaEngine with only audio codecs
+	// Create a MediaEngine with audio codecs
 	m := &webrtc.MediaEngine{}
 	
-	// Register PCMA (G.711 A-law) - WhatsApp's preferred codec
+	// Register Opus codec (WhatsApp's primary codec)
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		log.Fatal(err)
+	}
+	
+	// Register telephone-event for DTMF
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:  "audio/telephone-event",
+			ClockRate: 8000,
+		},
+		PayloadType: 126,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		log.Fatal(err)
+	}
+	
+	// Also register G.711 codecs as fallback
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypePCMA,
@@ -64,7 +88,6 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 		log.Fatal(err)
 	}
 	
-	// Register PCMU (G.711 μ-law) as fallback
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypePCMU,
@@ -401,6 +424,13 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		}()
 	})
 	
+	// Clean and validate the SDP
+	sdpOffer = strings.TrimSpace(sdpOffer)
+	sdpOffer = strings.ReplaceAll(sdpOffer, "\\r\\n", "\r\n")
+	sdpOffer = strings.ReplaceAll(sdpOffer, "\\n", "\n")
+	
+	log.Printf("🔍 SDP Offer (cleaned):\n%s", sdpOffer)
+	
 	// Set the remote description (WhatsApp's offer)
 	offer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer,
@@ -409,6 +439,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		log.Printf("❌ Failed to set remote description: %v", err)
+		log.Printf("📋 SDP that failed:\n%s", sdpOffer)
 		pc.Close()
 		return
 	}
