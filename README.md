@@ -86,6 +86,7 @@ Environment variables:
 - `PHONE_NUMBER_ID` - WhatsApp phone number ID
 - `VERIFY_TOKEN` - Webhook verification token
 - `OPENAI_API_KEY` - OpenAI API key (optional, enables AI voice assistant)
+- `ENABLE_ECHO` - Set to "true" to echo audio back to caller (for testing)
 - `PORT` - Server port (default: 3000)
 
 ## OpenAI Realtime API Integration

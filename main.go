@@ -171,6 +171,7 @@ func (b *WhatsAppBridge) Start() {
 	log.Printf("🔐 Verify token configured: %v", b.verifyToken != "")
 	log.Printf("🔑 Access token configured: %v", b.accessToken != "")
 	log.Printf("📱 Phone number ID: %s", b.phoneNumberID)
+	log.Printf("🔊 Echo mode: %v", os.Getenv("ENABLE_ECHO") == "true")
 	
 	if err := http.ListenAndServe(":"+port, router); err != nil {
 		log.Fatal(err)
@@ -412,19 +413,74 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		log.Printf("ICE Connection State for call %s: %s", callID, state.String())
 	})
 	
+	// Create audio track for sending audio back
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
+		MimeType: webrtc.MimeTypeOpus,
+	}, "audio", "pion")
+	if err != nil {
+		log.Printf("❌ Failed to create audio track: %v", err)
+	} else {
+		// Add track to peer connection
+		rtpSender, err := pc.AddTrack(audioTrack)
+		if err != nil {
+			log.Printf("❌ Failed to add audio track: %v", err)
+		} else {
+			// Handle RTCP packets
+			go func() {
+				rtcpBuf := make([]byte, 1500)
+				for {
+					if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+						return
+					}
+				}
+			}()
+			
+			// Store the audio track in the call
+			b.mu.Lock()
+			if call, exists := b.activeCalls[callID]; exists {
+				call.AudioTrack = audioTrack
+			}
+			b.mu.Unlock()
+			log.Printf("✅ Audio track created and added for echo")
+		}
+	}
+	
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Printf("🔊 Received audio track for call %s: %s", callID, track.ID())
+		log.Printf("🔊 Received audio track for call %s: %s (codec: %s)", callID, track.ID(), track.Codec().MimeType)
 		
-		// Process audio packets
+		// Get the local audio track for echo
+		b.mu.Lock()
+		call, exists := b.activeCalls[callID]
+		b.mu.Unlock()
+		
+		if !exists || call.AudioTrack == nil {
+			log.Printf("⚠️ No audio track available for echo")
+			return
+		}
+		
+		// Echo audio packets back
 		go func() {
 			buf := make([]byte, 1400)
+			packetCount := 0
 			for {
-				_, _, readErr := track.Read(buf)
+				n, _, readErr := track.Read(buf)
 				if readErr != nil {
+					log.Printf("❌ Error reading audio: %v", readErr)
 					return
 				}
-				// Audio packet received - you can process it here
-				// For now, we just acknowledge we're receiving audio
+				
+				packetCount++
+				if packetCount%100 == 0 {
+					log.Printf("🎤 Received %d audio packets (last packet size: %d bytes)", packetCount, n)
+				}
+				
+				// Echo the packet back (if echo mode is enabled)
+				if os.Getenv("ENABLE_ECHO") == "true" {
+					if err := call.AudioTrack.Write(buf[:n]); err != nil {
+						log.Printf("❌ Error writing echo: %v", err)
+						return
+					}
+				}
 			}
 		}()
 	})
