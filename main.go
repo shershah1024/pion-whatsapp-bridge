@@ -77,13 +77,15 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 	
 	// Register the RTP header extensions that WhatsApp uses
 	// These MUST be registered to parse the SDP correctly
-	for id, uri := range map[int]string{
-		1: "urn:ietf:params:rtp-hdrext:ssrc-audio-level",
-		2: "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time", 
-		3: "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
-	} {
+	extensions := []string{
+		"urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+		"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+		"http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+	}
+	
+	for _, uri := range extensions {
 		ext := webrtc.RTPHeaderExtensionCapability{URI: uri}
-		if err := m.RegisterHeaderExtension(ext, webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverDirectionRecvonly, id); err != nil {
+		if err := m.RegisterHeaderExtension(ext, webrtc.RTPCodecTypeAudio); err != nil {
 			log.Printf("Warning: Failed to register extension %s: %v", uri, err)
 		}
 	}
