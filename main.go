@@ -94,10 +94,10 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 		log.Fatal(err)
 	}
 	
-	// Create a SettingEngine and enable ice-lite mode
+	// Create a SettingEngine
 	s := webrtc.SettingEngine{}
-	s.SetLite(true) // Enable ice-lite mode for WhatsApp compatibility
-	s.SetAnsweringDTLSRole(webrtc.DTLSRoleServer)
+	// Don't set ice-lite mode - WhatsApp uses ice-lite in offer, but we shouldn't in answer
+	s.SetAnsweringDTLSRole(webrtc.DTLSRoleClient) // We should be active/client when WhatsApp is actpass
 	
 	// Configure network types - disable TCP since WhatsApp uses UDP only
 	s.SetNetworkTypes([]webrtc.NetworkType{
@@ -111,9 +111,13 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 		webrtc.WithSettingEngine(s),
 	)
 	
-	// Configure ICE servers (none needed for ice-lite)
+	// Configure ICE servers - we need STUN since we're not ice-lite
 	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{},
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{"stun:stun.l.google.com:19302"},
+			},
+		},
 	}
 	
 	verifyToken := os.Getenv("VERIFY_TOKEN")
@@ -413,6 +417,16 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		log.Printf("ICE Connection State for call %s: %s", callID, state.String())
 	})
 	
+	pc.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
+		log.Printf("ICE Gathering State for call %s: %s", callID, state.String())
+	})
+	
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			log.Printf("ICE Candidate for call %s: %s", callID, candidate.String())
+		}
+	})
+	
 	// Create audio track for sending audio back
 	audioTrack, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
 		MimeType: webrtc.MimeTypeOpus,
@@ -518,6 +532,26 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		log.Printf("❌ Failed to set local description: %v", err)
 		pc.Close()
 		return
+	}
+	
+	// Wait for ICE gathering to complete
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
+	
+	// Wait up to 3 seconds for gathering
+	select {
+	case <-gatherComplete:
+		log.Printf("✅ ICE gathering complete for call %s", callID)
+	case <-time.After(3 * time.Second):
+		log.Printf("⏱️ ICE gathering timeout for call %s", callID)
+	}
+	
+	// Get the local description with candidates
+	localDesc := pc.LocalDescription()
+	if localDesc != nil {
+		log.Printf("📄 SDP Answer with candidates:\n%s", localDesc.SDP)
+		answer.SDP = localDesc.SDP
+	} else {
+		log.Printf("📄 SDP Answer (no additional candidates):\n%s", answer.SDP)
 	}
 	
 	// Update the call with peer connection
@@ -826,51 +860,9 @@ func (b *WhatsAppBridge) processIncomingSDP(offerSDP string) (string, error) {
 		b.mu.Unlock()
 	}()
 	
-	return b.modifySDPForWhatsApp(answer.SDP), nil
+	return answer.SDP, nil
 }
 
-// modifySDPForWhatsApp modifies the SDP for WhatsApp compatibility
-func (b *WhatsAppBridge) modifySDPForWhatsApp(sdpStr string) string {
-	// Parse the SDP
-	sessionDescription := &sdp.SessionDescription{}
-	if err := sessionDescription.Unmarshal([]byte(sdpStr)); err != nil {
-		log.Printf("Failed to parse SDP: %v", err)
-		return sdpStr
-	}
-	
-	// Modify for WhatsApp compatibility
-	// - Ensure ice-lite attribute is present
-	// - Set connection to passive mode
-	// - Remove unnecessary attributes
-	
-	var modifiedSDP strings.Builder
-	modifiedSDP.WriteString("v=0\r\n")
-	modifiedSDP.WriteString(fmt.Sprintf("o=- %d %d IN IP4 0.0.0.0\r\n", time.Now().Unix(), time.Now().Unix()))
-	modifiedSDP.WriteString("s=Pion WhatsApp Bridge\r\n")
-	modifiedSDP.WriteString("c=IN IP4 0.0.0.0\r\n")
-	modifiedSDP.WriteString("t=0 0\r\n")
-	modifiedSDP.WriteString("a=ice-lite\r\n")
-	
-	// Add media sections
-	for _, media := range sessionDescription.MediaDescriptions {
-		if media.MediaName.Media == "audio" {
-			modifiedSDP.WriteString(fmt.Sprintf("m=audio %d RTP/AVP 8 0\r\n", media.MediaName.Port))
-			modifiedSDP.WriteString("a=rtpmap:8 PCMA/8000\r\n")
-			modifiedSDP.WriteString("a=rtpmap:0 PCMU/8000\r\n")
-			modifiedSDP.WriteString("a=sendrecv\r\n")
-			modifiedSDP.WriteString("a=setup:passive\r\n")
-			
-			// Add ICE credentials if present
-			for _, attr := range media.Attributes {
-				if attr.Key == "ice-ufrag" || attr.Key == "ice-pwd" {
-					modifiedSDP.WriteString(fmt.Sprintf("a=%s:%s\r\n", attr.Key, attr.Value))
-				}
-			}
-		}
-	}
-	
-	return modifiedSDP.String()
-}
 
 // generateOKResponseSDP generates a simple OK response SDP
 func (b *WhatsAppBridge) generateOKResponseSDP() string {
@@ -880,12 +872,11 @@ o=- %d %d IN IP4 0.0.0.0
 s=Pion WhatsApp Bridge OK Response
 c=IN IP4 0.0.0.0
 t=0 0
-a=ice-lite
-m=audio 20000 RTP/AVP 8 0
-a=rtpmap:8 PCMA/8000
-a=rtpmap:0 PCMU/8000
+m=audio 20000 RTP/AVP 111 126
+a=rtpmap:111 opus/48000/2
+a=rtpmap:126 telephone-event/8000
 a=sendrecv
-a=setup:passive
+a=setup:active
 a=ice-ufrag:pion%d
 a=ice-pwd:pion%d`, timestamp, timestamp, timestamp, timestamp)
 }
@@ -899,10 +890,11 @@ func (b *WhatsAppBridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
 		"status":       "running",
 		"bridge_type":  "pion",
-		"ice_lite":     true,
+		"ice_lite":     false, // We respond as full ICE agent to WhatsApp's ice-lite
 		"active_calls": activeCallCount,
 		"timestamp":    time.Now().Format(time.RFC3339),
 		"webhook_ready": true,
+		"echo_enabled": os.Getenv("ENABLE_ECHO") == "true",
 	}
 	
 	w.Header().Set("Content-Type", "application/json")
