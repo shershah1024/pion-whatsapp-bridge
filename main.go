@@ -259,28 +259,24 @@ func (b *WhatsAppBridge) handleWebhookEvent(w http.ResponseWriter, r *http.Reque
 	prettyJSON, _ := json.MarshalIndent(webhook, "", "  ")
 	log.Printf("📱 WhatsApp webhook parsed:\n%s", string(prettyJSON))
 	
-	// Process the webhook
-	response := b.processWebhook(webhook)
+	// Process the webhook asynchronously to return 200 OK immediately
+	go b.processWebhook(webhook)
 	
-	// Log response
-	responseJSON, _ := json.Marshal(response)
-	log.Printf("✉️ Sending response: %s", string(responseJSON))
-	
-	w.Header().Set("Content-Type", "application/json")
+	// WhatsApp expects a 200 OK response immediately
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	log.Printf("✉️ Sent 200 OK response to WhatsApp")
 }
 
 
 // processWebhook processes incoming webhook data
-func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) map[string]interface{} {
+func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) {
 	log.Println("🔍 Processing webhook data...")
 	
 	// Parse WhatsApp webhook structure
 	entry, ok := webhook["entry"].([]interface{})
 	if !ok || len(entry) == 0 {
 		log.Println("⚠️ No entry found in webhook")
-		return map[string]interface{}{"status": "ok", "message": "No entry found"}
+		return
 	}
 	
 	log.Printf("📊 Found %d entries", len(entry))
@@ -289,14 +285,14 @@ func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) map[stri
 	firstEntry, ok := entry[0].(map[string]interface{})
 	if !ok {
 		log.Println("⚠️ Invalid entry format")
-		return map[string]interface{}{"status": "ok", "message": "Invalid entry format"}
+		return
 	}
 	
 	// Get changes
 	changes, ok := firstEntry["changes"].([]interface{})
 	if !ok || len(changes) == 0 {
 		log.Println("⚠️ No changes found in entry")
-		return map[string]interface{}{"status": "ok", "message": "No changes found"}
+		return
 	}
 	
 	log.Printf("📊 Found %d changes", len(changes))
@@ -349,12 +345,6 @@ func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) map[stri
 		if field, ok := changeData["field"].(string); ok {
 			log.Printf("📌 Field attribute: %s", field)
 		}
-	}
-	
-	// Always return OK to acknowledge webhook receipt
-	return map[string]interface{}{
-		"status": "ok",
-		"message": "Webhook processed",
 	}
 }
 
