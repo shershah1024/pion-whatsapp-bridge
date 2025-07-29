@@ -46,7 +46,26 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 	// Create a MediaEngine with audio codecs
 	m := &webrtc.MediaEngine{}
 	
-	// Register Opus codec (WhatsApp's primary codec)
+	// Register RTP header extensions that WhatsApp uses
+	if err := m.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{
+		URI: "urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		log.Println("Warning: Failed to register ssrc-audio-level extension:", err)
+	}
+	
+	if err := m.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{
+		URI: "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		log.Println("Warning: Failed to register abs-send-time extension:", err)
+	}
+	
+	if err := m.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{
+		URI: "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		log.Println("Warning: Failed to register transport-wide-cc extension:", err)
+	}
+	
+	// Override with specific Opus configuration for WhatsApp
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeOpus,
@@ -426,37 +445,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		}
 	})
 	
-	// Create audio track for sending audio back
-	audioTrack, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
-		MimeType: webrtc.MimeTypeOpus,
-	}, "audio", "pion")
-	if err != nil {
-		log.Printf("❌ Failed to create audio track: %v", err)
-	} else {
-		// Add track to peer connection
-		rtpSender, err := pc.AddTrack(audioTrack)
-		if err != nil {
-			log.Printf("❌ Failed to add audio track: %v", err)
-		} else {
-			// Handle RTCP packets
-			go func() {
-				rtcpBuf := make([]byte, 1500)
-				for {
-					if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-						return
-					}
-				}
-			}()
-			
-			// Store the audio track in the call
-			b.mu.Lock()
-			if call, exists := b.activeCalls[callID]; exists {
-				call.AudioTrack = audioTrack
-			}
-			b.mu.Unlock()
-			log.Printf("✅ Audio track created and added for echo")
-		}
-	}
+	// We'll create and add the audio track AFTER setting remote description
 	
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Printf("🔊 Received audio track for call %s: %s (codec: %s)", callID, track.ID(), track.Codec().MimeType)
@@ -513,9 +502,51 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		log.Printf("❌ Failed to set remote description: %v", err)
+		log.Printf("📋 Error type: %T", err)
 		log.Printf("📋 SDP that failed:\n%s", sdpOffer)
+		
+		// Try to understand the error better
+		if strings.Contains(err.Error(), "extmap") {
+			log.Printf("💡 Error might be related to unsupported extensions")
+		}
+		
+		b.mu.Lock()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
 		pc.Close()
 		return
+	}
+	
+	// Now that remote description is set, create and add audio track
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
+		MimeType: webrtc.MimeTypeOpus,
+	}, "audio", "pion")
+	if err != nil {
+		log.Printf("❌ Failed to create audio track: %v", err)
+	} else {
+		// Add track to peer connection
+		rtpSender, err := pc.AddTrack(audioTrack)
+		if err != nil {
+			log.Printf("❌ Failed to add audio track: %v", err)
+		} else {
+			// Handle RTCP packets
+			go func() {
+				rtcpBuf := make([]byte, 1500)
+				for {
+					if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+						return
+					}
+				}
+			}()
+			
+			// Store the audio track in the call
+			b.mu.Lock()
+			if call, exists := b.activeCalls[callID]; exists {
+				call.AudioTrack = audioTrack
+			}
+			b.mu.Unlock()
+			log.Printf("✅ Audio track created and added for echo")
+		}
 	}
 	
 	// Create answer
