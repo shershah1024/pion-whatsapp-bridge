@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v3"
 )
 
