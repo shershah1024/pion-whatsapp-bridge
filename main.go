@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -32,6 +33,8 @@ type WhatsAppBridge struct {
 	activeCalls   map[string]*Call
 	mu            sync.Mutex
 	webhookSecret string
+	accessToken   string
+	phoneNumberID string
 }
 
 // Call represents an active WhatsApp call session
@@ -98,11 +101,23 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 		webhookSecret = WEBHOOK_SECRET
 	}
 	
+	accessToken := os.Getenv("WHATSAPP_ACCESS_TOKEN")
+	if accessToken == "" {
+		log.Println("⚠️  WHATSAPP_ACCESS_TOKEN not set - API calls will fail")
+	}
+	
+	phoneNumberID := os.Getenv("WHATSAPP_PHONE_NUMBER_ID")
+	if phoneNumberID == "" {
+		log.Println("⚠️  WHATSAPP_PHONE_NUMBER_ID not set - API calls will fail")
+	}
+	
 	return &WhatsAppBridge{
 		api:           api,
 		config:        config,
 		activeCalls:   make(map[string]*Call),
 		webhookSecret: webhookSecret,
+		accessToken:   accessToken,
+		phoneNumberID: phoneNumberID,
 	}
 }
 
@@ -197,16 +212,264 @@ func (b *WhatsAppBridge) verifySignature(body []byte, signature string) bool {
 
 // processWebhook processes incoming webhook data
 func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) map[string]interface{} {
-	// Check if it's a call-related webhook
-	// This is where we'd parse WhatsApp's call initiation
-	// For now, return OK response
-	
-	// Generate a simple OK response
-	return map[string]interface{}{
-		"status":  "ok",
-		"message": "Call processed successfully",
-		"call_id": fmt.Sprintf("call_%d", time.Now().Unix()),
+	// Parse WhatsApp webhook structure
+	entry, ok := webhook["entry"].([]interface{})
+	if !ok || len(entry) == 0 {
+		return map[string]interface{}{"status": "ok", "message": "No entry found"}
 	}
+	
+	// Get first entry
+	firstEntry, ok := entry[0].(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"status": "ok", "message": "Invalid entry format"}
+	}
+	
+	// Get changes
+	changes, ok := firstEntry["changes"].([]interface{})
+	if !ok || len(changes) == 0 {
+		return map[string]interface{}{"status": "ok", "message": "No changes found"}
+	}
+	
+	// Process each change
+	for _, change := range changes {
+		changeData, ok := change.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		
+		// Check if it's a calls field
+		if field, ok := changeData["field"].(string); ok && field == "calls" {
+			value, ok := changeData["value"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			
+			// Process call events
+			if calls, ok := value["calls"].([]interface{}); ok && len(calls) > 0 {
+				for _, call := range calls {
+					b.handleCallEvent(call.(map[string]interface{}))
+				}
+			}
+		}
+	}
+	
+	// Always return OK to acknowledge webhook receipt
+	return map[string]interface{}{
+		"status": "ok",
+		"message": "Webhook processed",
+	}
+}
+
+// handleCallEvent processes individual call events from webhooks
+func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
+	// Extract call information
+	callID, _ := callData["id"].(string)
+	event, _ := callData["event"].(string)
+	direction, _ := callData["direction"].(string)
+	from, _ := callData["from"].(string)
+	to, _ := callData["to"].(string)
+	
+	log.Printf("📞 Call event: %s (ID: %s, Direction: %s, From: %s, To: %s)", event, callID, direction, from, to)
+	
+	switch event {
+	case "connect":
+		// Handle incoming call with SDP offer
+		if direction == "USER_INITIATED" {
+			// Extract SDP from session
+			if session, ok := callData["session"].(map[string]interface{}); ok {
+				sdpOffer, _ := session["sdp"].(string)
+				sdpType, _ := session["sdp_type"].(string)
+				
+				if sdpType == "offer" && sdpOffer != "" {
+					log.Printf("📥 Received SDP offer for call %s", callID)
+					// Process the call asynchronously
+					go b.acceptIncomingCall(callID, sdpOffer, from)
+				}
+			}
+		}
+		
+	case "terminate":
+		// Handle call termination
+		b.mu.Lock()
+		if call, exists := b.activeCalls[callID]; exists {
+			call.PeerConnection.Close()
+			delete(b.activeCalls, callID)
+			log.Printf("☎️ Call terminated: %s", callID)
+		}
+		b.mu.Unlock()
+		
+	default:
+		log.Printf("📋 Unhandled call event: %s", event)
+	}
+}
+
+// acceptIncomingCall handles accepting an incoming WhatsApp call
+func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber string) {
+	// Create a new PeerConnection
+	pc, err := b.api.NewPeerConnection(b.config)
+	if err != nil {
+		log.Printf("❌ Failed to create peer connection: %v", err)
+		return
+	}
+	
+	// Set up handlers
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("ICE Connection State for call %s: %s", callID, state.String())
+	})
+	
+	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("🔊 Received audio track for call %s: %s", callID, track.ID())
+		
+		// Process audio packets
+		go func() {
+			buf := make([]byte, 1400)
+			for {
+				_, _, readErr := track.Read(buf)
+				if readErr != nil {
+					return
+				}
+				// Audio packet received - you can process it here
+				// For now, we just acknowledge we're receiving audio
+			}
+		}()
+	})
+	
+	// Set the remote description (WhatsApp's offer)
+	offer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  sdpOffer,
+	}
+	
+	if err := pc.SetRemoteDescription(offer); err != nil {
+		log.Printf("❌ Failed to set remote description: %v", err)
+		pc.Close()
+		return
+	}
+	
+	// Create answer
+	answer, err := pc.CreateAnswer(nil)
+	if err != nil {
+		log.Printf("❌ Failed to create answer: %v", err)
+		pc.Close()
+		return
+	}
+	
+	// Set local description
+	if err := pc.SetLocalDescription(answer); err != nil {
+		log.Printf("❌ Failed to set local description: %v", err)
+		pc.Close()
+		return
+	}
+	
+	// Store the call
+	b.mu.Lock()
+	b.activeCalls[callID] = &Call{
+		ID:             callID,
+		PeerConnection: pc,
+		StartTime:      time.Now(),
+	}
+	b.mu.Unlock()
+	
+	// Send pre-accept to WhatsApp API for faster connection
+	if err := b.sendPreAcceptCall(callID, answer.SDP); err != nil {
+		log.Printf("❌ Failed to pre-accept call: %v", err)
+	}
+	
+	// Send accept to WhatsApp API
+	if err := b.sendAcceptCall(callID, answer.SDP); err != nil {
+		log.Printf("❌ Failed to accept call: %v", err)
+		b.mu.Lock()
+		pc.Close()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
+		return
+	}
+	
+	log.Printf("✅ Call accepted: %s from %s", callID, callerNumber)
+	
+	// Play a simple audio tone or message
+	// In a real implementation, you'd connect to your audio processing system here
+	go b.playWelcomeMessage(pc)
+}
+
+// sendPreAcceptCall sends pre-accept to WhatsApp API
+func (b *WhatsAppBridge) sendPreAcceptCall(callID, sdpAnswer string) error {
+	return b.callWhatsAppAPI("pre_accept", callID, sdpAnswer)
+}
+
+// sendAcceptCall sends accept to WhatsApp API
+func (b *WhatsAppBridge) sendAcceptCall(callID, sdpAnswer string) error {
+	return b.callWhatsAppAPI("accept", callID, sdpAnswer)
+}
+
+// callWhatsAppAPI makes API calls to WhatsApp
+func (b *WhatsAppBridge) callWhatsAppAPI(action, callID, sdpAnswer string) error {
+	if b.accessToken == "" || b.phoneNumberID == "" {
+		return fmt.Errorf("WhatsApp credentials not configured")
+	}
+	
+	url := fmt.Sprintf("https://graph.facebook.com/v18.0/%s/calls", b.phoneNumberID)
+	
+	payload := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"call_id":          callID,
+		"action":           action,
+		"session": map[string]string{
+			"sdp_type": "answer",
+			"sdp":      sdpAnswer,
+		},
+	}
+	
+	if action == "accept" {
+		payload["biz_opaque_callback_data"] = fmt.Sprintf("pion_%d", time.Now().Unix())
+	}
+	
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+	
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+b.accessToken)
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	body, _ := io.ReadAll(resp.Body)
+	
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("WhatsApp API error: %s - %s", resp.Status, string(body))
+	}
+	
+	log.Printf("✅ WhatsApp API %s successful for call %s", action, callID)
+	return nil
+}
+
+// playWelcomeMessage plays a welcome message or tone
+func (b *WhatsAppBridge) playWelcomeMessage(pc *webrtc.PeerConnection) {
+	// In a real implementation, you would:
+	// 1. Create an audio track
+	// 2. Generate or load audio data (welcome message)
+	// 3. Send it through the peer connection
+	
+	// For now, just log that we would play audio
+	log.Println("🎵 Would play welcome message to caller")
+	
+	// Example of how to add an audio track:
+	// track, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypePCMA}, "audio", "pion")
+	// if err == nil {
+	//     _, err = pc.AddTrack(track)
+	//     // Then write RTP packets to the track
+	// }
 }
 
 // handleTestCall handles test call requests

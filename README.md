@@ -1,6 +1,6 @@
 # Pion WhatsApp Bridge
 
-A pure Go implementation for bridging WhatsApp calls using Pion WebRTC with native ice-lite support.
+A pure Go implementation for handling WhatsApp voice calls using Pion WebRTC. This bridge receives WhatsApp call webhooks, negotiates WebRTC connections, and enables real-time voice communication with WhatsApp users.
 
 ## Why Pion?
 
@@ -14,12 +14,12 @@ After exploring Janus Gateway, we switched to Pion for several compelling reason
 
 ## Features
 
-- ✅ WhatsApp Business API webhook integration
-- ✅ ice-lite mode for WhatsApp compatibility
-- ✅ Audio detection and OK response system
-- ✅ SDP negotiation for WhatsApp's format
-- ✅ ngrok integration for public access
-- ✅ Simple deployment with single binary
+- ✅ **Real WhatsApp Voice Calls** - Handle actual voice calls from WhatsApp users
+- ✅ **WebRTC Integration** - Full WebRTC peer connection with WhatsApp
+- ✅ **ice-lite Mode** - Compatible with WhatsApp's passive ICE requirements
+- ✅ **Automatic Call Acceptance** - Pre-accept and accept calls via WhatsApp API
+- ✅ **Audio Processing Ready** - Receive and process real-time audio from callers
+- ✅ **Simple Deployment** - Single Go binary with Railway support
 
 ## Prerequisites
 
@@ -64,11 +64,12 @@ WhatsApp Call → Internet → ngrok → Pion Bridge → WebRTC Processing
 
 ## How It Works
 
-1. **WhatsApp Webhook** - Receives call initiation from WhatsApp Business API
-2. **SDP Processing** - Parses WhatsApp's SDP and creates compatible response
-3. **ice-lite Mode** - Acts as passive ICE endpoint (required by WhatsApp)
-4. **Audio Detection** - Monitors incoming RTP packets
-5. **OK Response** - Sends acknowledgment when audio is detected
+1. **User Calls Business** - WhatsApp user initiates a voice call to your business number
+2. **Webhook Notification** - WhatsApp sends webhook with call event and SDP offer
+3. **WebRTC Negotiation** - Bridge creates peer connection and SDP answer
+4. **API Response** - Bridge calls WhatsApp API to accept call with SDP answer
+5. **Media Connection** - WebRTC connection established for real-time audio
+6. **Audio Processing** - Receive audio packets from caller (ready for AI/processing)
 
 ## API Endpoints
 

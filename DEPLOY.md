@@ -48,10 +48,28 @@ In Railway dashboard:
 
 1. Go to your project
 2. Click on "Variables"
-3. Add:
+3. Add these required variables:
    ```
-   WHATSAPP_WEBHOOK_SECRET=your_actual_webhook_secret
+   WHATSAPP_ACCESS_TOKEN=your_whatsapp_access_token
+   WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
+   WHATSAPP_WEBHOOK_SECRET=your_webhook_secret
    ```
+
+### How to get these values:
+
+1. **WHATSAPP_ACCESS_TOKEN**:
+   - Go to [Meta for Developers](https://developers.facebook.com)
+   - Navigate to your app → WhatsApp → API Setup
+   - Copy the temporary or permanent access token
+
+2. **WHATSAPP_PHONE_NUMBER_ID**:
+   - In the same API Setup page
+   - Find your phone number
+   - Copy the Phone number ID (not the display number)
+
+3. **WHATSAPP_WEBHOOK_SECRET**:
+   - Go to your app → Webhooks
+   - Set up a webhook secret for signature verification
 
 ## Step 4: Get Your Public URL
 
