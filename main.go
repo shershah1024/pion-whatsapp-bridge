@@ -489,12 +489,36 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	sdpOffer = strings.ReplaceAll(sdpOffer, "\\r\\n", "\r\n")
 	sdpOffer = strings.ReplaceAll(sdpOffer, "\\n", "\n")
 	
+	// Ensure SDP ends with a newline (required by some parsers)
+	if !strings.HasSuffix(sdpOffer, "\n") && !strings.HasSuffix(sdpOffer, "\r\n") {
+		sdpOffer += "\r\n"
+		log.Printf("📝 Added missing newline to SDP")
+	}
+	
 	log.Printf("🔍 SDP Offer (cleaned):\n%s", sdpOffer)
 	log.Printf("📏 SDP length: %d bytes", len(sdpOffer))
 	
 	// Validate SDP starts correctly
 	if !strings.HasPrefix(sdpOffer, "v=0") {
 		log.Printf("❌ Invalid SDP: doesn't start with v=0")
+	}
+	
+	// Count the number of lines for debugging
+	lines := strings.Split(sdpOffer, "\n")
+	log.Printf("📊 SDP has %d lines", len(lines))
+	
+	// Check for common SDP sections
+	hasAudio := strings.Contains(sdpOffer, "m=audio")
+	hasIceLite := strings.Contains(sdpOffer, "a=ice-lite")
+	hasOpus := strings.Contains(sdpOffer, "opus/48000")
+	log.Printf("✓ SDP contains: audio=%v, ice-lite=%v, opus=%v", hasAudio, hasIceLite, hasOpus)
+	
+	// Try to parse specific problem areas
+	if strings.Contains(sdpOffer, "a=extmap:") {
+		log.Printf("📡 SDP contains extmap attributes - these might cause parsing issues")
+		// Count extmap lines
+		extmapCount := strings.Count(sdpOffer, "a=extmap:")
+		log.Printf("📡 Found %d extmap attributes", extmapCount)
 	}
 	
 	// Set the remote description (WhatsApp's offer)
