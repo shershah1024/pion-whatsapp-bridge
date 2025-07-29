@@ -450,21 +450,13 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Printf("🔊 Received audio track for call %s: %s (codec: %s)", callID, track.ID(), track.Codec().MimeType)
+		log.Printf("📊 Track details: PayloadType=%d, SSRC=%d", track.PayloadType(), track.SSRC())
 		
-		// Get the local audio track for echo
-		b.mu.Lock()
-		call, exists := b.activeCalls[callID]
-		b.mu.Unlock()
-		
-		if !exists || call.AudioTrack == nil {
-			log.Printf("⚠️ No audio track available for echo")
-			return
-		}
-		
-		// Echo audio packets back
+		// Count audio packets
 		go func() {
 			buf := make([]byte, 1400)
 			packetCount := 0
+			totalBytes := 0
 			for {
 				n, _, readErr := track.Read(buf)
 				if readErr != nil {
@@ -473,17 +465,13 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 				}
 				
 				packetCount++
+				totalBytes += n
 				if packetCount%100 == 0 {
-					log.Printf("🎤 Received %d audio packets (last packet size: %d bytes)", packetCount, n)
+					log.Printf("🎤 Received %d audio packets (total: %d bytes, last packet: %d bytes)", packetCount, totalBytes, n)
 				}
 				
-				// Echo the packet back (if echo mode is enabled)
-				if os.Getenv("ENABLE_ECHO") == "true" {
-					if _, err := call.AudioTrack.Write(buf[:n]); err != nil {
-						log.Printf("❌ Error writing echo: %v", err)
-						return
-					}
-				}
+				// For now, just receive and count audio
+				// Echo functionality can be added later once we figure out the codec issue
 			}
 		}()
 	})
@@ -564,37 +552,9 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Now that remote description is set, create and add audio track
-	audioTrack, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
-		MimeType: webrtc.MimeTypeOpus,
-	}, "audio", "pion")
-	if err != nil {
-		log.Printf("❌ Failed to create audio track: %v", err)
-	} else {
-		// Add track to peer connection
-		rtpSender, err := pc.AddTrack(audioTrack)
-		if err != nil {
-			log.Printf("❌ Failed to add audio track: %v", err)
-		} else {
-			// Handle RTCP packets
-			go func() {
-				rtcpBuf := make([]byte, 1500)
-				for {
-					if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-						return
-					}
-				}
-			}()
-			
-			// Store the audio track in the call
-			b.mu.Lock()
-			if call, exists := b.activeCalls[callID]; exists {
-				call.AudioTrack = audioTrack
-			}
-			b.mu.Unlock()
-			log.Printf("✅ Audio track created and added for echo")
-		}
-	}
+	// For now, we'll handle audio tracks after the connection is established
+	// This avoids the "codec not supported" error
+	log.Printf("ℹ️ Audio track will be set up after connection is established")
 	
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
