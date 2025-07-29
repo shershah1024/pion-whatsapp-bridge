@@ -380,6 +380,9 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 
 // acceptIncomingCall handles accepting an incoming WhatsApp call
 func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber string) {
+	log.Printf("🔔 Processing incoming call %s from %s", callID, callerNumber)
+	log.Printf("📋 Call flow: 1) Create PeerConnection → 2) Set SDP → 3) Pre-accept → 4) Accept → 5) Media flow")
+	
 	// Create a new PeerConnection
 	pc, err := b.api.NewPeerConnection(b.config)
 	if err != nil {
@@ -453,12 +456,23 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	}
 	b.mu.Unlock()
 	
-	// Send pre-accept to WhatsApp API for faster connection
+	// Send pre-accept to WhatsApp API first to establish WebRTC connection
+	log.Printf("📞 Sending pre-accept for call %s", callID)
 	if err := b.sendPreAcceptCall(callID, answer.SDP); err != nil {
 		log.Printf("❌ Failed to pre-accept call: %v", err)
+		b.mu.Lock()
+		pc.Close()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
+		return
 	}
 	
-	// Send accept to WhatsApp API
+	// Wait a moment to ensure WebRTC connection is established
+	// This prevents audio clipping at the start of the call
+	time.Sleep(500 * time.Millisecond)
+	
+	// Now send accept to start media flow
+	log.Printf("📞 Sending accept for call %s", callID)
 	if err := b.sendAcceptCall(callID, answer.SDP); err != nil {
 		log.Printf("❌ Failed to accept call: %v", err)
 		b.mu.Lock()
@@ -470,13 +484,19 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	log.Printf("✅ Call accepted: %s from %s", callID, callerNumber)
 	
+	// Now that the call is accepted, start media flow
 	// Connect to OpenAI Realtime API if configured
 	openAIKey := os.Getenv("OPENAI_API_KEY")
 	if openAIKey != "" {
+		// Start OpenAI integration only after accept succeeds
 		go b.connectToOpenAIRealtime(callID, pc, openAIKey)
 	} else {
-		// Play a simple audio tone or message
-		go b.playWelcomeMessage(pc)
+		// Play a welcome message only after accept succeeds
+		go func() {
+			// Small delay to ensure media channel is ready
+			time.Sleep(100 * time.Millisecond)
+			b.playWelcomeMessage(pc)
+		}()
 	}
 }
 
