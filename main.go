@@ -476,7 +476,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 				
 				// Echo the packet back (if echo mode is enabled)
 				if os.Getenv("ENABLE_ECHO") == "true" {
-					if err := call.AudioTrack.Write(buf[:n]); err != nil {
+					if _, err := call.AudioTrack.Write(buf[:n]); err != nil {
 						log.Printf("❌ Error writing echo: %v", err)
 						return
 					}
