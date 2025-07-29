@@ -420,9 +420,18 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
+	// Set up ICE connection channel
+	iceConnected := make(chan bool, 1)
+	
 	// Set up handlers
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Printf("ICE Connection State for call %s: %s", callID, state.String())
+		if state == webrtc.ICEConnectionStateConnected || state == webrtc.ICEConnectionStateCompleted {
+			select {
+			case iceConnected <- true:
+			default:
+			}
+		}
 	})
 	
 	pc.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
@@ -483,6 +492,12 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	sdpOffer = strings.ReplaceAll(sdpOffer, "\\n", "\n")
 	
 	log.Printf("🔍 SDP Offer (cleaned):\n%s", sdpOffer)
+	log.Printf("📏 SDP length: %d bytes", len(sdpOffer))
+	
+	// Validate SDP starts correctly
+	if !strings.HasPrefix(sdpOffer, "v=0") {
+		log.Printf("❌ Invalid SDP: doesn't start with v=0")
+	}
 	
 	// Set the remote description (WhatsApp's offer)
 	offer := webrtc.SessionDescription{
@@ -592,9 +607,16 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Wait a moment to ensure WebRTC connection is established
-	// This prevents audio clipping at the start of the call
-	time.Sleep(500 * time.Millisecond)
+	// Wait for ICE connection to be established after pre-accept
+	log.Printf("⏳ Waiting for ICE connection after pre-accept...")
+	
+	// Wait up to 5 seconds for ICE connection
+	select {
+	case <-iceConnected:
+		log.Printf("✅ ICE connection established")
+	case <-time.After(5 * time.Second):
+		log.Printf("⏱️ ICE connection timeout - proceeding anyway")
+	}
 	
 	// Now send accept to start media flow
 	log.Printf("📞 Sending accept for call %s", callID)
