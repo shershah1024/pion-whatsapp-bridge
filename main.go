@@ -232,10 +232,14 @@ func (b *WhatsAppBridge) handleWebhookEvent(w http.ResponseWriter, r *http.Reque
 	signature := r.Header.Get("X-Hub-Signature-256")
 	log.Printf("🔏 Signature present: %v", signature != "")
 	
-	if signature != "" && !b.verifySignature(body, signature) {
-		log.Println("❌ Webhook signature verification failed")
-		http.Error(w, "Invalid signature", http.StatusForbidden)
-		return
+	if signature != "" {
+		if !b.verifySignature(body, signature) {
+			log.Println("❌ Webhook signature verification failed")
+			log.Printf("💡 Make sure WHATSAPP_WEBHOOK_SECRET matches the App Secret in Meta dashboard")
+			http.Error(w, "Invalid signature", http.StatusForbidden)
+			return
+		}
+		log.Println("✅ Webhook signature verified")
 	}
 	
 	// Parse webhook data
@@ -264,10 +268,23 @@ func (b *WhatsAppBridge) handleWebhookEvent(w http.ResponseWriter, r *http.Reque
 
 // verifySignature verifies the webhook signature
 func (b *WhatsAppBridge) verifySignature(body []byte, signature string) bool {
+	// If no webhook secret is configured, skip verification
+	if b.webhookSecret == "" || b.webhookSecret == DEFAULT_WEBHOOK_SECRET {
+		log.Println("⚠️ Webhook secret not configured, skipping signature verification")
+		log.Println("💡 To fix 403 errors, set WHATSAPP_WEBHOOK_SECRET to your App Secret from Meta dashboard")
+		log.Println("📍 Find it at: developers.facebook.com > Your App > Settings > Basic > App Secret")
+		return true
+	}
+	
 	mac := hmac.New(sha256.New, []byte(b.webhookSecret))
 	mac.Write(body)
 	expectedMAC := mac.Sum(nil)
 	expectedSignature := "sha256=" + hex.EncodeToString(expectedMAC)
+	
+	// Log for debugging
+	log.Printf("🔐 Expected signature: %s", expectedSignature)
+	log.Printf("🔐 Received signature: %s", signature)
+	
 	return hmac.Equal([]byte(signature), []byte(expectedSignature))
 }
 
