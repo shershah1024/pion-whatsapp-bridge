@@ -50,24 +50,29 @@ In Railway dashboard:
 2. Click on "Variables"
 3. Add these required variables:
    ```
-   WHATSAPP_ACCESS_TOKEN=your_whatsapp_access_token
-   WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
+   WHATSAPP_TOKEN=your_whatsapp_access_token
+   PHONE_NUMBER_ID=your_phone_number_id
+   VERIFY_TOKEN=your_verify_token
    WHATSAPP_WEBHOOK_SECRET=your_webhook_secret
    ```
 
 ### How to get these values:
 
-1. **WHATSAPP_ACCESS_TOKEN**:
+1. **WHATSAPP_TOKEN**:
    - Go to [Meta for Developers](https://developers.facebook.com)
    - Navigate to your app → WhatsApp → API Setup
    - Copy the temporary or permanent access token
 
-2. **WHATSAPP_PHONE_NUMBER_ID**:
+2. **PHONE_NUMBER_ID**:
    - In the same API Setup page
    - Find your phone number
    - Copy the Phone number ID (not the display number)
 
-3. **WHATSAPP_WEBHOOK_SECRET**:
+3. **VERIFY_TOKEN**:
+   - You choose this token
+   - Use it when configuring the webhook in WhatsApp
+
+4. **WHATSAPP_WEBHOOK_SECRET**:
    - Go to your app → Webhooks
    - Set up a webhook secret for signature verification
 

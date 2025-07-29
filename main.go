@@ -102,19 +102,19 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 		webhookSecret = DEFAULT_WEBHOOK_SECRET
 	}
 	
-	verifyToken := os.Getenv("WHATSAPP_VERIFY_TOKEN")
+	verifyToken := os.Getenv("VERIFY_TOKEN")
 	if verifyToken == "" {
 		verifyToken = DEFAULT_VERIFY_TOKEN
 	}
 	
-	accessToken := os.Getenv("WHATSAPP_ACCESS_TOKEN")
+	accessToken := os.Getenv("WHATSAPP_TOKEN")
 	if accessToken == "" {
-		log.Println("⚠️  WHATSAPP_ACCESS_TOKEN not set - API calls will fail")
+		log.Println("⚠️  WHATSAPP_TOKEN not set - API calls will fail")
 	}
 	
-	phoneNumberID := os.Getenv("WHATSAPP_PHONE_NUMBER_ID")
+	phoneNumberID := os.Getenv("PHONE_NUMBER_ID")
 	if phoneNumberID == "" {
-		log.Println("⚠️  WHATSAPP_PHONE_NUMBER_ID not set - API calls will fail")
+		log.Println("⚠️  PHONE_NUMBER_ID not set - API calls will fail")
 	}
 	
 	return &WhatsAppBridge{

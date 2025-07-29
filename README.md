@@ -82,6 +82,9 @@ WhatsApp Call → Internet → ngrok → Pion Bridge → WebRTC Processing
 ## Configuration
 
 Environment variables:
+- `WHATSAPP_TOKEN` - WhatsApp access token
+- `PHONE_NUMBER_ID` - WhatsApp phone number ID
+- `VERIFY_TOKEN` - Webhook verification token
 - `WHATSAPP_WEBHOOK_SECRET` - Webhook signature secret
 - `PORT` - Server port (default: 3000)
 
