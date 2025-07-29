@@ -610,6 +610,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	// Send pre-accept to WhatsApp API first to establish WebRTC connection
 	log.Printf("📞 Sending pre-accept for call %s", callID)
+	log.Printf("📄 First 200 chars of answer SDP: %.200s...", answer.SDP)
 	if err := b.sendPreAcceptCall(callID, answer.SDP); err != nil {
 		log.Printf("❌ Failed to pre-accept call: %v", err)
 		b.mu.Lock()
@@ -700,6 +701,9 @@ func (b *WhatsAppBridge) callWhatsAppAPI(action, callID, sdpAnswer string) error
 		return err
 	}
 	
+	log.Printf("📤 WhatsApp API %s request to %s:", action, url)
+	log.Printf("📤 Payload: %s", string(jsonData))
+	
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return err
@@ -717,11 +721,22 @@ func (b *WhatsAppBridge) callWhatsAppAPI(action, callID, sdpAnswer string) error
 	
 	body, _ := io.ReadAll(resp.Body)
 	
+	log.Printf("📡 WhatsApp API %s response: Status=%d, Body=%s", action, resp.StatusCode, string(body))
+	
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("WhatsApp API error: %s - %s", resp.Status, string(body))
 	}
 	
-	log.Printf("✅ WhatsApp API %s successful for call %s", action, callID)
+	// Parse response to check if it was truly successful
+	var apiResp map[string]interface{}
+	if err := json.Unmarshal(body, &apiResp); err == nil {
+		if success, ok := apiResp["success"].(bool); ok && success {
+			log.Printf("✅ WhatsApp API %s successful for call %s", action, callID)
+		} else {
+			log.Printf("⚠️ WhatsApp API %s response doesn't confirm success: %v", action, apiResp)
+		}
+	}
+	
 	return nil
 }
 
