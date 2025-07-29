@@ -46,70 +46,46 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 	// Create a MediaEngine with audio codecs
 	m := &webrtc.MediaEngine{}
 	
-	// Register RTP header extensions that WhatsApp uses
-	if err := m.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{
-		URI: "urn:ietf:params:rtp-hdrext:ssrc-audio-level",
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		log.Println("Warning: Failed to register ssrc-audio-level extension:", err)
-	}
-	
-	if err := m.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{
-		URI: "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		log.Println("Warning: Failed to register abs-send-time extension:", err)
-	}
-	
-	if err := m.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{
-		URI: "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		log.Println("Warning: Failed to register transport-wide-cc extension:", err)
-	}
-	
-	// Override with specific Opus configuration for WhatsApp
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+	// First register the Opus codec with WhatsApp's exact parameters
+	opusCodec := webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
 			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
+			SDPFmtpLine: "minptime=10;useinbandfec=1", // Match WhatsApp's fmtp exactly
+			RTCPFeedback: []webrtc.RTCPFeedback{
+				{Type: "transport-cc"},
+			},
 		},
 		PayloadType: 111,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		log.Fatal(err)
+	}
+	if err := m.RegisterCodec(opusCodec, webrtc.RTPCodecTypeAudio); err != nil {
+		log.Fatal("Failed to register Opus codec:", err)
 	}
 	
-	// Register telephone-event for DTMF
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+	// Register telephone-event for DTMF with WhatsApp's payload type
+	telephoneEvent := webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:  "audio/telephone-event",
 			ClockRate: 8000,
 		},
 		PayloadType: 126,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		log.Fatal(err)
+	}
+	if err := m.RegisterCodec(telephoneEvent, webrtc.RTPCodecTypeAudio); err != nil {
+		log.Fatal("Failed to register telephone-event codec:", err)
 	}
 	
-	// Also register G.711 codecs as fallback
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:    webrtc.MimeTypePCMA,
-			ClockRate:   8000,
-			Channels:    1,
-		},
-		PayloadType: 8,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		log.Fatal(err)
-	}
-	
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:    webrtc.MimeTypePCMU,
-			ClockRate:   8000,
-			Channels:    1,
-		},
-		PayloadType: 0,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		log.Fatal(err)
+	// Register the RTP header extensions that WhatsApp uses
+	// These MUST be registered to parse the SDP correctly
+	for id, uri := range map[int]string{
+		1: "urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+		2: "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time", 
+		3: "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+	} {
+		ext := webrtc.RTPHeaderExtensionCapability{URI: uri}
+		if err := m.RegisterHeaderExtension(ext, webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverDirectionRecvonly, id); err != nil {
+			log.Printf("Warning: Failed to register extension %s: %v", uri, err)
+		}
 	}
 	
 	// Create a SettingEngine
@@ -359,6 +335,14 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 	
 	log.Printf("📞 Call event: %s (ID: %s, Direction: %s, From: %s, To: %s)", event, callID, direction, from, to)
 	
+	// Log additional call data for debugging
+	if status, ok := callData["status"].(string); ok {
+		log.Printf("📞 Call status: %s", status)
+	}
+	if timestamp, ok := callData["timestamp"].(string); ok {
+		log.Printf("📞 Call timestamp: %s", timestamp)
+	}
+	
 	switch event {
 	case "connect":
 		// Handle incoming call with SDP offer
@@ -386,8 +370,20 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 		}
 		b.mu.Unlock()
 		
+	case "ringing":
+		log.Printf("🔔 Call ringing: %s", callID)
+		// WhatsApp is notifying us that the call is ringing
+		// We don't need to do anything here, just log it
+		
+	case "answered":
+		log.Printf("📞 Call answered: %s", callID)
+		// The call was answered (might be on another device)
+		
 	default:
 		log.Printf("📋 Unhandled call event: %s", event)
+		// Log the entire call data for unknown events
+		callJSON, _ := json.MarshalIndent(callData, "", "  ")
+		log.Printf("📋 Full call data:\n%s", string(callJSON))
 	}
 }
 
@@ -508,11 +504,25 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		log.Printf("❌ Failed to set remote description: %v", err)
 		log.Printf("📋 Error type: %T", err)
+		log.Printf("📋 Full error string: %q", err.Error())
 		log.Printf("📋 SDP that failed:\n%s", sdpOffer)
 		
-		// Try to understand the error better
-		if strings.Contains(err.Error(), "extmap") {
-			log.Printf("💡 Error might be related to unsupported extensions")
+		// Try parsing the SDP manually to see where it fails
+		if sdpBytes := []byte(sdpOffer); len(sdpBytes) > 0 {
+			log.Printf("📋 First 50 chars: %q", string(sdpBytes[:min(50, len(sdpBytes))]))
+			log.Printf("📋 Last 50 chars: %q", string(sdpBytes[max(0, len(sdpBytes)-50):]))
+		}
+		
+		// Check for specific error patterns
+		errStr := err.Error()
+		if strings.Contains(errStr, "EOF") {
+			log.Printf("💡 EOF error - SDP might be truncated or have parsing issues")
+		}
+		if strings.Contains(errStr, "extmap") {
+			log.Printf("💡 Error related to RTP extensions")
+		}
+		if strings.Contains(errStr, "codec") {
+			log.Printf("💡 Error related to codec registration")
 		}
 		
 		b.mu.Lock()
@@ -937,6 +947,17 @@ func (b *WhatsAppBridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"timestamp":    time.Now().Format(time.RFC3339),
 		"webhook_ready": true,
 		"echo_enabled": os.Getenv("ENABLE_ECHO") == "true",
+		"environment": map[string]bool{
+			"whatsapp_token_set": b.accessToken != "",
+			"phone_number_id_set": b.phoneNumberID != "",
+			"verify_token_set": b.verifyToken != "",
+		},
+		"codec_support": []string{
+			"opus/48000/2 (PT:111)",
+			"telephone-event/8000 (PT:126)",
+		},
+		"webhook_endpoint": "/whatsapp-call",
+		"railway_url": os.Getenv("RAILWAY_PUBLIC_DOMAIN"),
 	}
 	
 	w.Header().Set("Content-Type", "application/json")
@@ -947,6 +968,20 @@ func (b *WhatsAppBridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (b *WhatsAppBridge) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func main() {
