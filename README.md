@@ -85,7 +85,6 @@ Environment variables:
 - `WHATSAPP_TOKEN` - WhatsApp access token
 - `PHONE_NUMBER_ID` - WhatsApp phone number ID
 - `VERIFY_TOKEN` - Webhook verification token
-- `WHATSAPP_WEBHOOK_SECRET` - Webhook signature secret
 - `OPENAI_API_KEY` - OpenAI API key (optional, enables AI voice assistant)
 - `PORT` - Server port (default: 3000)
 

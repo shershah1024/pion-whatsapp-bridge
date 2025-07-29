@@ -53,7 +53,6 @@ In Railway dashboard:
    WHATSAPP_TOKEN=your_whatsapp_access_token
    PHONE_NUMBER_ID=your_phone_number_id
    VERIFY_TOKEN=your_verify_token
-   WHATSAPP_WEBHOOK_SECRET=your_webhook_secret
    ```
 
 ### How to get these values:
@@ -71,10 +70,6 @@ In Railway dashboard:
 3. **VERIFY_TOKEN**:
    - You choose this token
    - Use it when configuring the webhook in WhatsApp
-
-4. **WHATSAPP_WEBHOOK_SECRET**:
-   - Go to your app → Webhooks
-   - Set up a webhook secret for signature verification
 
 ## Step 4: Get Your Public URL
 

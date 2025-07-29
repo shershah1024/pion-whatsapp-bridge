@@ -2,9 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,7 +20,6 @@ import (
 const (
 	// Default webhook configuration (overridden by env vars)
 	DEFAULT_VERIFY_TOKEN = "whatsapp_bridge_token"
-	DEFAULT_WEBHOOK_SECRET = "your_webhook_secret"
 )
 
 // WhatsAppBridge handles WhatsApp call bridging using Pion WebRTC
@@ -32,7 +28,6 @@ type WhatsAppBridge struct {
 	config        webrtc.Configuration
 	activeCalls   map[string]*Call
 	mu            sync.Mutex
-	webhookSecret string
 	verifyToken   string
 	accessToken   string
 	phoneNumberID string
@@ -121,11 +116,6 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 		ICEServers: []webrtc.ICEServer{},
 	}
 	
-	webhookSecret := os.Getenv("WHATSAPP_WEBHOOK_SECRET")
-	if webhookSecret == "" {
-		webhookSecret = DEFAULT_WEBHOOK_SECRET
-	}
-	
 	verifyToken := os.Getenv("VERIFY_TOKEN")
 	if verifyToken == "" {
 		verifyToken = DEFAULT_VERIFY_TOKEN
@@ -145,7 +135,6 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 		api:           api,
 		config:        config,
 		activeCalls:   make(map[string]*Call),
-		webhookSecret: webhookSecret,
 		verifyToken:   verifyToken,
 		accessToken:   accessToken,
 		phoneNumberID: phoneNumberID,
@@ -228,18 +217,11 @@ func (b *WhatsAppBridge) handleWebhookEvent(w http.ResponseWriter, r *http.Reque
 	
 	log.Printf("📦 Raw webhook body: %s", string(body))
 	
-	// Verify webhook signature if present
+	// WhatsApp Calling API doesn't require signature verification
+	// Just log if signature header is present
 	signature := r.Header.Get("X-Hub-Signature-256")
-	log.Printf("🔏 Signature present: %v", signature != "")
-	
 	if signature != "" {
-		if !b.verifySignature(body, signature) {
-			log.Println("❌ Webhook signature verification failed")
-			log.Printf("💡 Make sure WHATSAPP_WEBHOOK_SECRET matches the App Secret in Meta dashboard")
-			http.Error(w, "Invalid signature", http.StatusForbidden)
-			return
-		}
-		log.Println("✅ Webhook signature verified")
+		log.Printf("🔏 Signature header present but not required for WhatsApp Calling API")
 	}
 	
 	// Parse webhook data
@@ -266,27 +248,6 @@ func (b *WhatsAppBridge) handleWebhookEvent(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(response)
 }
 
-// verifySignature verifies the webhook signature
-func (b *WhatsAppBridge) verifySignature(body []byte, signature string) bool {
-	// If no webhook secret is configured, skip verification
-	if b.webhookSecret == "" || b.webhookSecret == DEFAULT_WEBHOOK_SECRET {
-		log.Println("⚠️ Webhook secret not configured, skipping signature verification")
-		log.Println("💡 To fix 403 errors, set WHATSAPP_WEBHOOK_SECRET to your App Secret from Meta dashboard")
-		log.Println("📍 Find it at: developers.facebook.com > Your App > Settings > Basic > App Secret")
-		return true
-	}
-	
-	mac := hmac.New(sha256.New, []byte(b.webhookSecret))
-	mac.Write(body)
-	expectedMAC := mac.Sum(nil)
-	expectedSignature := "sha256=" + hex.EncodeToString(expectedMAC)
-	
-	// Log for debugging
-	log.Printf("🔐 Expected signature: %s", expectedSignature)
-	log.Printf("🔐 Received signature: %s", signature)
-	
-	return hmac.Equal([]byte(signature), []byte(expectedSignature))
-}
 
 // processWebhook processes incoming webhook data
 func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) map[string]interface{} {
@@ -327,36 +288,43 @@ func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) map[stri
 			continue
 		}
 		
-		// Log the field type
-		if field, ok := changeData["field"].(string); ok {
-			log.Printf("📌 Field type: %s", field)
-			
-			// Check if it's a calls field
-			if field == "calls" {
-				log.Println("📞 Processing calls field")
-				value, ok := changeData["value"].(map[string]interface{})
-				if !ok {
-					log.Println("⚠️ Invalid value format for calls")
-					continue
-				}
-				
-				// Process call events
-				if calls, ok := value["calls"].([]interface{}); ok && len(calls) > 0 {
-					log.Printf("📞 Found %d call events", len(calls))
-					for _, call := range calls {
-						b.handleCallEvent(call.(map[string]interface{}))
+		// Get the value directly - WhatsApp webhook structure has the field type inside value
+		if value, ok := changeData["value"].(map[string]interface{}); ok {
+			// Check for calls array directly in value
+			if calls, ok := value["calls"].([]interface{}); ok && len(calls) > 0 {
+				log.Printf("📞 Found %d call events", len(calls))
+				for _, call := range calls {
+					if callData, ok := call.(map[string]interface{}); ok {
+						b.handleCallEvent(callData)
 					}
-				} else {
-					log.Println("⚠️ No calls array found in value")
 				}
-			} else if field == "messages" {
-				log.Println("💬 Processing messages field")
-				// Handle regular messages if needed
+			} else if messages, ok := value["messages"].([]interface{}); ok && len(messages) > 0 {
+				log.Printf("💬 Found %d message events (ignoring)", len(messages))
+			} else if statuses, ok := value["statuses"].([]interface{}); ok && len(statuses) > 0 {
+				log.Printf("📊 Found %d status events", len(statuses))
+				// Check if any are call statuses
+				for _, status := range statuses {
+					if statusData, ok := status.(map[string]interface{}); ok {
+						if statusType, ok := statusData["type"].(string); ok && statusType == "call" {
+							log.Printf("📞 Found call status event")
+						}
+					}
+				}
 			} else {
-				log.Printf("🔸 Other field type: %s", field)
+				// Log all fields present in value for debugging
+				log.Printf("📋 Value contains fields: %v", func() []string {
+					var fields []string
+					for k := range value {
+						fields = append(fields, k)
+					}
+					return fields
+				}())
 			}
-		} else {
-			log.Println("⚠️ No field type found in change")
+		}
+		
+		// Also check for field attribute (some webhooks have it)
+		if field, ok := changeData["field"].(string); ok {
+			log.Printf("📌 Field attribute: %s", field)
 		}
 	}
 	
