@@ -40,6 +40,7 @@ type Call struct {
 	AudioTrack     *webrtc.TrackLocalStaticRTP
 	StartTime      time.Time
 	OpenAIClient   *OpenAIRealtimeClient
+	AudioProcessor *AudioProcessor
 }
 
 // NewWhatsAppBridge creates a new bridge instance
@@ -368,6 +369,11 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 		// Handle call termination
 		b.mu.Lock()
 		if call, exists := b.activeCalls[callID]; exists {
+			// Stop audio processor
+			if call.AudioProcessor != nil {
+				call.AudioProcessor.Stop()
+				log.Printf("🛑 Stopped audio processor for call %s", callID)
+			}
 			// Close WebRTC connection
 			if call.PeerConnection != nil {
 				call.PeerConnection.Close()
@@ -377,6 +383,10 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 				call.OpenAIClient.Close()
 				log.Printf("🤖 Closed OpenAI connection for call %s", callID)
 			}
+			// Log call duration
+			callDuration := time.Since(call.StartTime)
+			log.Printf("📊 Call %s lasted %v", callID, callDuration)
+			
 			delete(b.activeCalls, callID)
 			log.Printf("☎️ Call terminated and cleaned up: %s", callID)
 		} else {
@@ -515,29 +525,32 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 						openAIForwardingStarted = true
 					}
 					
-					// Use audio processor to properly send audio to OpenAI
-					if !openAIForwardingStarted {
-						// Create audio processor on first use
-						processor := NewAudioProcessor(openAIClient)
-						processor.Start()
+					// Create audio processor on first use
+					if activeCall.AudioProcessor == nil {
+						activeCall.AudioProcessor = NewAudioProcessor(openAIClient)
+						activeCall.AudioProcessor.Start()
 						
-						// Store processor in a way we can access it later for cleanup
-						// For now, just process inline
+						// Store it back in the call
+						b.mu.Lock()
+						if c, exists := b.activeCalls[callID]; exists {
+							c.AudioProcessor = activeCall.AudioProcessor
+						}
+						b.mu.Unlock()
 					}
 					
-					// Create a simple audio processor inline for now
-					// In production, we'd store this processor properly
-					processor := NewAudioProcessor(openAIClient)
-					if err := processor.ProcessRTPPacket(buf[:n]); err != nil {
-						if packetCount <= 3 { // Only log first few errors
-							log.Printf("❌ Error processing audio for OpenAI: %v", err)
-						}
-					} else if packetCount == 1 || (openAIForwardingStarted && packetCount%100 == 0) {
-						if packetCount == 1 {
-							log.Printf("✅ First WhatsApp audio packet forwarded to OpenAI!")
-						} else {
-							log.Printf("📦 Forwarded %d WhatsApp packets (%d KB) to OpenAI", 
-								packetCount, totalBytes/1024)
+					// Use the stored audio processor
+					if activeCall.AudioProcessor != nil {
+						if err := activeCall.AudioProcessor.ProcessRTPPacket(buf[:n]); err != nil {
+							if packetCount <= 3 { // Only log first few errors
+								log.Printf("❌ Error processing audio for OpenAI: %v", err)
+							}
+						} else if packetCount == 1 || packetCount%100 == 0 {
+							if packetCount == 1 {
+								log.Printf("✅ First WhatsApp audio packet forwarded to OpenAI!")
+							} else {
+								log.Printf("📦 Forwarded %d WhatsApp packets (%d KB) to OpenAI", 
+									packetCount, totalBytes/1024)
+							}
 						}
 					}
 				} else {

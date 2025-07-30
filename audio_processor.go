@@ -93,6 +93,16 @@ func (p *AudioProcessor) ProcessRTPPacket(rtpData []byte) error {
 		}
 		p.lastCommitTime = time.Now()
 	}
+	
+	// After 3 seconds, trigger a manual response if we haven't heard anything
+	if p.packetCount == 150 { // 150 packets = 3 seconds at 20ms intervals
+		log.Printf("🎯 Triggering manual OpenAI response after 3 seconds")
+		go func() {
+			if err := p.openAIClient.TriggerResponse("I can hear you. How can I help you today?"); err != nil {
+				log.Printf("❌ Failed to trigger manual response: %v", err)
+			}
+		}()
+	}
 
 	return nil
 }
