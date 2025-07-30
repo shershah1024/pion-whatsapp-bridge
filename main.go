@@ -367,11 +367,17 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 		// Handle call termination
 		b.mu.Lock()
 		if call, exists := b.activeCalls[callID]; exists {
+			// Close WebRTC connection
 			if call.PeerConnection != nil {
 				call.PeerConnection.Close()
 			}
+			// Close OpenAI connection
+			if call.OpenAIClient != nil {
+				call.OpenAIClient.Close()
+				log.Printf("🤖 Closed OpenAI connection for call %s", callID)
+			}
 			delete(b.activeCalls, callID)
-			log.Printf("☎️ Call terminated: %s", callID)
+			log.Printf("☎️ Call terminated and cleaned up: %s", callID)
 		} else {
 			log.Printf("☎️ Terminate event for unknown call: %s", callID)
 		}
@@ -508,9 +514,16 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 						openAIForwardingStarted = true
 					}
 					
+					// TODO: Fix OpenAI audio forwarding
+					// Currently sending RTP to audio track, but OpenAI expects:
+					// 1. Decode Opus RTP packets to PCM16 audio  
+					// 2. Base64 encode the PCM16 data
+					// 3. Send via data channel using SendAudioToOpenAI()
+					// 4. Periodically call CommitAudioBuffer()
+					
 					if err := openAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
 						if packetCount <= 3 { // Only log first few errors
-							log.Printf("❌ Error forwarding to OpenAI: %v", err)
+							log.Printf("❌ Error forwarding to OpenAI (wrong method): %v", err)
 						}
 					} else if packetCount == 1 || (openAIForwardingStarted && packetCount%100 == 0) {
 						if packetCount == 1 {
