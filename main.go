@@ -605,9 +605,26 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Don't add a track yet - WhatsApp's Opus codec has specific parameters
-	// We'll add it after the connection is established to avoid codec mismatch
-	log.Printf("ℹ️ Skipping audio track for now to avoid codec mismatch")
+	// Add a transceiver for bidirectional audio
+	// This ensures our SDP has sendrecv instead of recvonly
+	_, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionSendrecv,
+	})
+	if err != nil {
+		log.Printf("❌ Failed to add audio transceiver: %v", err)
+		b.mu.Lock()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
+		if pc != nil {
+			pc.Close()
+		}
+		return
+	}
+	
+	log.Printf("✅ Added audio transceiver for bidirectional audio")
+	
+	// We'll add the actual track later to avoid codec issues
+	// For now, just having the transceiver ensures sendrecv in SDP
 	
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
@@ -833,13 +850,26 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	}
 	b.mu.Unlock()
 	
+	// Find the audio transceiver we created earlier
+	var audioSender *webrtc.RTPSender
+	for _, transceiver := range whatsappPC.GetTransceivers() {
+		if transceiver.Kind() == webrtc.RTPCodecTypeAudio {
+			audioSender = transceiver.Sender()
+			break
+		}
+	}
+	
+	if audioSender == nil {
+		log.Printf("❌ No audio transceiver found on WhatsApp connection")
+		return
+	}
+	
 	// Create audio track for sending OpenAI's audio to WhatsApp
-	// Use the exact codec parameters that WhatsApp expects
+	// Use telephone-event which is what WhatsApp expects
 	whatsappAudioTrack, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
-			MimeType:  webrtc.MimeTypeOpus,
-			ClockRate: 48000,
-			Channels:  2,
+			MimeType:  "audio/telephone-event",
+			ClockRate: 8000,
 		},
 		"audio",
 		"openai-to-whatsapp",
@@ -849,22 +879,11 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 		return
 	}
 	
-	// Add the track to WhatsApp peer connection
-	rtpSender, err := whatsappPC.AddTrack(whatsappAudioTrack)
-	if err != nil {
-		log.Printf("❌ Failed to add audio track to WhatsApp: %v", err)
+	// Replace the transceiver's track
+	if err := audioSender.ReplaceTrack(whatsappAudioTrack); err != nil {
+		log.Printf("❌ Failed to replace audio track: %v", err)
 		return
 	}
-	
-	// Read incoming RTCP packets
-	go func() {
-		rtcpBuf := make([]byte, 1500)
-		for {
-			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-				return
-			}
-		}
-	}()
 	
 	// Store the audio track in the call
 	b.mu.Lock()
@@ -873,7 +892,7 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	}
 	b.mu.Unlock()
 	
-	log.Printf("✅ Added audio track to WhatsApp connection for OpenAI audio")
+	log.Printf("✅ Replaced transceiver track for OpenAI audio")
 	
 	// Wait a moment for connections to stabilize
 	time.Sleep(500 * time.Millisecond)
