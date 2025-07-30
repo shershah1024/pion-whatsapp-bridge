@@ -351,11 +351,11 @@ func (c *OpenAIRealtimeClient) sendOfferToOpenAI(offerSDP string) (string, error
 		return "", err
 	}
 	
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("OpenAI API error: %s - %s", resp.Status, string(answerSDP))
 	}
 	
-	log.Printf("📥 Received SDP answer from OpenAI (length: %d bytes)", len(answerSDP))
+	log.Printf("📥 Received SDP answer from OpenAI (status: %d, length: %d bytes)", resp.StatusCode, len(answerSDP))
 	return string(answerSDP), nil
 }
 
