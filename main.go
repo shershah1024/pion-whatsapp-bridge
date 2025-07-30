@@ -993,7 +993,9 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	time.Sleep(500 * time.Millisecond)
 	
 	// Set up bidirectional audio forwarding between WhatsApp and OpenAI
-	log.Printf("🔄 Setting up bidirectional audio forwarding")
+	log.Printf("🔄 Setting up bidirectional audio forwarding (v3 - no test packets)")
+	log.Printf("📊 Call %s: WhatsApp → OpenAI (RTP forwarding)", callID)
+	log.Printf("📊 Call %s: OpenAI → WhatsApp (waiting for track)", callID)
 	
 	// Forward audio from OpenAI to WhatsApp
 	go func() {
@@ -1270,8 +1272,9 @@ func max(a, b int) int {
 }
 
 func main() {
-	log.Println("🚀 Starting Pion WhatsApp Bridge")
+	log.Println("🚀 Starting Pion WhatsApp Bridge v3 - Proper Audio Architecture")
 	log.Println("✨ Pure Go implementation with native ice-lite support")
+	log.Println("🎯 Direct RTP forwarding: WhatsApp ↔️ OpenAI")
 	
 	bridge := NewWhatsAppBridge()
 	bridge.Start()
