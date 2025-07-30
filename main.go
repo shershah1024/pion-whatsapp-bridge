@@ -465,9 +465,9 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		log.Printf("🔊 Received audio track for call %s: %s (codec: %s)", callID, track.ID(), track.Codec().MimeType)
 		log.Printf("📊 Track details: PayloadType=%d, SSRC=%d, Kind=%s", track.PayloadType(), track.SSRC(), track.Kind().String())
 		
-		// Get the call to access OpenAI client
+		// Verify call exists
 		b.mu.Lock()
-		activeCall, exists := b.activeCalls[callID]
+		_, exists := b.activeCalls[callID]
 		b.mu.Unlock()
 		
 		if !exists {
