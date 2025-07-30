@@ -1002,7 +1002,7 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	time.Sleep(500 * time.Millisecond)
 	
 	// Test with simple audio generation first to unlock WhatsApp audio
-	log.Printf("🧪 Starting test audio generation to unlock WhatsApp audio stream")
+	log.Printf("🧪 Starting test audio generation to unlock WhatsApp audio stream (v2)")
 	
 	// Generate continuous Opus silence to activate WhatsApp's audio stream
 	go func() {
