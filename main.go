@@ -462,7 +462,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Printf("🔊 Received audio track for call %s: %s (codec: %s)", callID, track.ID(), track.Codec().MimeType)
-		log.Printf("📊 Track details: PayloadType=%d, SSRC=%d", track.PayloadType(), track.SSRC())
+		log.Printf("📊 Track details: PayloadType=%d, SSRC=%d, Kind=%s", track.PayloadType(), track.SSRC(), track.Kind().String())
 		
 		// Get the call to access OpenAI client
 		b.mu.Lock()
@@ -673,13 +673,21 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	// Wait for ICE connection to be established after pre-accept
 	log.Printf("⏳ Waiting for ICE connection after pre-accept...")
 	
+	// Create a timeout timer
+	iceTimer := time.NewTimer(5 * time.Second)
+	defer iceTimer.Stop()
+	
 	// Wait up to 5 seconds for ICE connection
 	select {
 	case <-iceConnected:
-		log.Printf("✅ ICE connection established")
-	case <-time.After(5 * time.Second):
-		log.Printf("⏱️ ICE connection timeout - proceeding anyway")
+		log.Printf("✅ ICE connection established - proceeding with accept")
+		iceTimer.Stop()
+	case <-iceTimer.C:
+		log.Printf("⏱️ ICE connection timeout after 5 seconds - proceeding anyway")
 	}
+	
+	// Small delay to ensure connection is stable
+	time.Sleep(100 * time.Millisecond)
 	
 	// Now send accept to start media flow
 	log.Printf("📞 Sending accept for call %s", callID)
@@ -696,13 +704,24 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	log.Printf("✅ Call accepted: %s from %s", callID, callerNumber)
 	
+	// Log the current state
+	connectionState := pc.ConnectionState()
+	iceState := pc.ICEConnectionState()
+	log.Printf("📊 Connection states - PC: %s, ICE: %s", connectionState.String(), iceState.String())
+	
 	// Now that the call is accepted, start media flow
 	// Connect to OpenAI Realtime API if configured
 	openAIKey := os.Getenv("OPENAI_API_KEY")
 	if openAIKey != "" {
+		log.Printf("🤖 OpenAI API key found, starting AI integration...")
 		// Start OpenAI integration only after accept succeeds
-		go b.connectToOpenAIRealtime(callID, pc, openAIKey)
+		go func() {
+			// Small delay to ensure everything is ready
+			time.Sleep(500 * time.Millisecond)
+			b.connectToOpenAIRealtime(callID, pc, openAIKey)
+		}()
 	} else {
+		log.Printf("ℹ️ No OpenAI API key found, will play welcome message")
 		// Play a welcome message only after accept succeeds
 		go func() {
 			// Small delay to ensure media channel is ready
