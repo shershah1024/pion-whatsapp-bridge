@@ -675,8 +675,12 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	}
 	
 	// Log the final SDP that will be sent
-	log.Printf("📄 Final SDP Answer being sent to WhatsApp:")
-	log.Printf("%s", answer.SDP)
+	log.Printf("📄 Final SDP Answer being sent to WhatsApp (first 500 chars):")
+	if len(answer.SDP) > 500 {
+		log.Printf("%s...", answer.SDP[:500])
+	} else {
+		log.Printf("%s", answer.SDP)
+	}
 	
 	// Check if it contains sendrecv
 	if strings.Contains(answer.SDP, "a=sendrecv") {
@@ -923,7 +927,22 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	go func() {
 		time.Sleep(1 * time.Second) // Wait for connections to stabilize
 		
+		// Get the audio track from the call
+		b.mu.Lock()
+		activeCall, exists := b.activeCalls[callID]
+		var testAudioTrack *webrtc.TrackLocalStaticRTP
+		if exists && activeCall != nil {
+			testAudioTrack = activeCall.AudioTrack
+		}
+		b.mu.Unlock()
+		
 		log.Printf("🎵 Starting continuous test audio generation for WhatsApp")
+		log.Printf("📊 WhatsApp audio track exists: %v", testAudioTrack != nil)
+		
+		if testAudioTrack == nil {
+			log.Printf("❌ No WhatsApp audio track available!")
+			return
+		}
 		
 		// Generate Opus-encoded silence
 		// TrackLocalStaticRTP.Write expects Opus-encoded data, not raw PCM
@@ -938,7 +957,7 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 		
 		packetCount := 0
 		for range ticker.C {
-			if _, err := whatsappAudioTrack.Write(opusFrame); err != nil {
+			if _, err := testAudioTrack.Write(opusFrame); err != nil {
 				log.Printf("❌ Error writing test audio after %d packets: %v", packetCount, err)
 				return
 			}
