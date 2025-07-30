@@ -624,14 +624,6 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	// Log transceiver details
 	log.Printf("✅ Added audio transceiver for bidirectional audio (no track yet)")
 	log.Printf("📊 Transceiver direction: %s", transceiver.Direction())
-	log.Printf("📊 Transceiver current direction: %s", transceiver.CurrentDirection())
-	
-	// Get the codecs to verify what we're offering
-	codecs := pc.GetConfiguration().Codecs
-	log.Printf("📊 Available codecs: %d", len(codecs))
-	for i, codec := range codecs {
-		log.Printf("  Codec %d: %s", i, codec.RTPCodecCapability.MimeType)
-	}
 	
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
