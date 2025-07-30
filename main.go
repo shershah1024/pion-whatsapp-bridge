@@ -777,16 +777,8 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		// Since it's interleaved stereo, that's 960 * 2 * 2 bytes (16-bit) = 3840 bytes
 		// But TrackLocalStaticRTP.Write expects Opus-encoded data, not raw PCM
 		
-		// Create a proper Opus silence frame
-		// Opus can encode silence very efficiently
-		// TOC byte (0x04) = SILK-only, mono, 20ms
-		// Followed by a minimal SILK frame indicating silence
-		opusSilence := []byte{
-			0x04,       // TOC: SILK-only, mono, 20ms
-			0x00,       // SILK frame: minimal size indicating silence
-		}
-		
-		// For stereo, use different TOC
+		// Create a proper Opus stereo silence frame
+		// For stereo, use CELT mode
 		opusStereoSilence := []byte{
 			0xFC,       // TOC: CELT-only, stereo, 20ms  
 			0xFF, 0xFE, // Minimal CELT stereo silence frame
