@@ -441,6 +441,7 @@ func (c *OpenAIRealtimeClient) ForwardRTPToOpenAI(rtpPacket []byte) error {
 	}
 	
 	// Write RTP packet directly to the track
+	// This sends Opus-encoded audio from WhatsApp to OpenAI
 	if _, err := c.audioTrack.Write(rtpPacket); err != nil {
 		return fmt.Errorf("failed to write RTP packet: %v", err)
 	}

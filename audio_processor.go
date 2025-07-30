@@ -60,10 +60,18 @@ func (p *AudioProcessor) ProcessRTPPacket(rtpData []byte) error {
 	p.firstPacket = false
 
 	// OpenAI expects PCM16 audio, not Opus
-	// For now, let's send silence PCM16 data to test the connection
-	// In production, we'd decode the Opus payload to PCM16
+	// Extract the Opus payload from RTP packet
+	opusData := packet.Payload
 	
-	// Generate 20ms of PCM16 silence (960 samples at 48kHz)
+	// TODO: Properly decode Opus to PCM16
+	// For now, we'll still use silence but log the actual Opus data
+	if p.packetCount < 5 {
+		log.Printf("📊 Opus frame %d: size=%d bytes, first bytes=%x", 
+			p.packetCount, len(opusData), opusData[:min(4, len(opusData))])
+	}
+	
+	// Generate 20ms of PCM16 silence as placeholder
+	// In production, this should be: pcm16Data := DecodeOpusToPCM16(opusData)
 	pcm16Data := generateSilencePCM16(20)
 	
 	// Accumulate audio in buffer
@@ -152,6 +160,14 @@ func generateSilencePCM16(durationMs int) []byte {
 	
 	// Fill with zeros (silence)
 	return pcm
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Helper function to convert Opus to PCM16 (placeholder)
