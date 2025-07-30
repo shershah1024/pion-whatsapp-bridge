@@ -685,6 +685,13 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		log.Printf("❌ WARNING: SDP contains recvonly - only receive audio!")
 	} else if strings.Contains(answer.SDP, "a=sendonly") {
 		log.Printf("⚠️ WARNING: SDP contains sendonly - only send audio!")
+	} else {
+		log.Printf("⚠️ WARNING: No explicit direction attribute found in SDP")
+	}
+	
+	// Also check for audio media line
+	if !strings.Contains(answer.SDP, "m=audio") {
+		log.Printf("❌ WARNING: No audio media line in SDP!")
 	}
 	
 	// Wait for ICE gathering to complete
@@ -910,17 +917,25 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 			if track := openAIClient.GetRemoteAudioTrack(); track != nil {
 				log.Printf("🔊 Starting to forward audio from OpenAI to WhatsApp")
 				buf := make([]byte, 1400)
+				packetCount := 0
 				for {
 					n, _, readErr := track.Read(buf)
 					if readErr != nil {
-						log.Printf("❌ Error reading from OpenAI: %v", readErr)
+						log.Printf("❌ Error reading from OpenAI after %d packets: %v", packetCount, readErr)
 						return
 					}
 					
 					// Forward to WhatsApp
 					if _, writeErr := whatsappAudioTrack.Write(buf[:n]); writeErr != nil {
-						log.Printf("❌ Error writing to WhatsApp: %v", writeErr)
+						log.Printf("❌ Error writing to WhatsApp after %d packets: %v", packetCount, writeErr)
 						return
+					}
+					
+					packetCount++
+					if packetCount == 1 {
+						log.Printf("✅ First OpenAI audio packet forwarded to WhatsApp!")
+					} else if packetCount%100 == 0 {
+						log.Printf("📦 Forwarded %d OpenAI packets to WhatsApp", packetCount)
 					}
 				}
 			}
