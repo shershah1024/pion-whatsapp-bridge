@@ -239,6 +239,13 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			if session, ok := event["session"].(map[string]interface{}); ok {
 				log.Printf("📋 Session details: %+v", session)
 			}
+			// Trigger a welcome message
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				if err := c.TriggerResponse("Hello! I'm an AI assistant. How can I help you today?"); err != nil {
+					log.Printf("❌ Failed to send welcome message: %v", err)
+				}
+			}()
 		case "session.updated":
 			log.Println("✅ Session updated")
 		case "conversation.item.created":
@@ -256,6 +263,12 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			}
 		case "response.done":
 			log.Println("✅ Response complete")
+		case "input_audio_buffer.speech_started":
+			log.Println("🎤 Speech detected by OpenAI")
+		case "input_audio_buffer.speech_stopped":
+			log.Println("🔇 Speech ended")
+		case "input_audio_buffer.committed":
+			log.Println("📤 Audio buffer committed to OpenAI")
 		case "error":
 			log.Printf("❌ OpenAI error: %+v", event)
 		default:
@@ -433,6 +446,29 @@ func (c *OpenAIRealtimeClient) ForwardRTPToOpenAI(rtpPacket []byte) error {
 // GetRemoteAudioTrack returns the audio track from OpenAI
 func (c *OpenAIRealtimeClient) GetRemoteAudioTrack() *webrtc.TrackRemote {
 	return c.remoteAudioTrack
+}
+
+// TriggerResponse sends a response.create event to make OpenAI speak
+func (c *OpenAIRealtimeClient) TriggerResponse(text string) error {
+	if c.dataChannel == nil || c.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
+		return fmt.Errorf("data channel not open")
+	}
+	
+	event := map[string]interface{}{
+		"type": "response.create",
+		"response": map[string]interface{}{
+			"modalities": []string{"text", "audio"},
+			"instructions": text,
+		},
+	}
+	
+	eventJSON, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	
+	log.Printf("📤 Triggering OpenAI response: %s", text)
+	return c.dataChannel.SendText(string(eventJSON))
 }
 
 // Close closes the connection to OpenAI

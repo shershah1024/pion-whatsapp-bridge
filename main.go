@@ -812,39 +812,48 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 		log.Printf("⚠️ OpenAI audio track not available after 5 seconds")
 	}()
 	
-	// Forward audio from WhatsApp to OpenAI (this replaces the OnTrack handler)
-	// We need to find existing tracks that might already be set up
-	for _, transceiver := range whatsappPC.GetTransceivers() {
-		if transceiver.Receiver() != nil && transceiver.Kind() == webrtc.RTPCodecTypeAudio {
-			track := transceiver.Receiver().Track()
-			if track != nil {
-				log.Printf("🎤 Found existing WhatsApp audio track, starting forwarding to OpenAI")
-				go func(track *webrtc.TrackRemote) {
-					buf := make([]byte, 1400)
-					packetCount := 0
-					for {
-						n, _, readErr := track.Read(buf)
-						if readErr != nil {
-							log.Printf("❌ Error reading from WhatsApp: %v", readErr)
-							return
+	// Set up OnTrack handler for incoming WhatsApp audio
+	audioForwardStarted := false
+	whatsappPC.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("🎤 Received WhatsApp audio track: %s (codec: %s, SSRC: %d)", 
+			track.ID(), track.Codec().MimeType, track.SSRC())
+		
+		if !audioForwardStarted && track.Kind() == webrtc.RTPCodecTypeAudio {
+			audioForwardStarted = true
+			log.Printf("🔄 Starting audio forwarding from WhatsApp to OpenAI")
+			
+			go func() {
+				buf := make([]byte, 1400)
+				packetCount := 0
+				totalBytes := 0
+				
+				for {
+					n, _, readErr := track.Read(buf)
+					if readErr != nil {
+						log.Printf("❌ Error reading from WhatsApp after %d packets: %v", packetCount, readErr)
+						return
+					}
+					
+					totalBytes += n
+					
+					// Forward RTP packet directly to OpenAI
+					if err := openAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
+						if packetCount == 0 {
+							log.Printf("❌ Error forwarding to OpenAI: %v", err)
 						}
-						
-						// Forward RTP packet directly to OpenAI
-						if err := openAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
-							if packetCount == 0 {
-								log.Printf("❌ Error forwarding to OpenAI: %v", err)
-							}
-						} else {
-							packetCount++
-							if packetCount%100 == 0 {
-								log.Printf("📦 Forwarded %d packets from WhatsApp to OpenAI", packetCount)
-							}
+					} else {
+						packetCount++
+						if packetCount == 1 {
+							log.Printf("✅ First audio packet forwarded to OpenAI!")
+						} else if packetCount%100 == 0 {
+							log.Printf("📦 Forwarded %d packets (%d KB) from WhatsApp to OpenAI", 
+								packetCount, totalBytes/1024)
 						}
 					}
-				}(track)
-			}
+				}
+			}()
 		}
-	}
+	})
 	
 	log.Printf("✅ OpenAI Realtime connection established for call %s", callID)
 }
