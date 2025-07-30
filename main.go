@@ -799,11 +799,12 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		// Since it's interleaved stereo, that's 960 * 2 * 2 bytes (16-bit) = 3840 bytes
 		// But TrackLocalStaticRTP.Write expects Opus-encoded data, not raw PCM
 		
-		// Create a proper Opus stereo silence frame
-		// For stereo, use CELT mode
+		// Create a proper Opus stereo silence frame (20ms at 48kHz)
+		// Use a more complete Opus frame to avoid RTP header issues
 		opusStereoSilence := []byte{
-			0xFC,       // TOC: CELT-only, stereo, 20ms  
-			0xFF, 0xFE, // Minimal CELT stereo silence frame
+			0xFC,                   // TOC: stereo, 20ms, CELT mode
+			0x02,                   // Frame length code (indicates 2 more bytes follow)
+			0x00, 0x00,            // Stereo silence payload
 		}
 		
 		ticker := time.NewTicker(20 * time.Millisecond)
@@ -980,75 +981,55 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	// Wait a moment for connections to stabilize
 	time.Sleep(500 * time.Millisecond)
 	
-	// TEST: Generate continuous audio instead of forwarding OpenAI
-	// This helps verify if WhatsApp accepts our audio format
-	go func() {
-		time.Sleep(1 * time.Second) // Wait for connections to stabilize
-		
-		// Get the audio track from the call
-		b.mu.Lock()
-		activeCall, exists := b.activeCalls[callID]
-		var testAudioTrack *webrtc.TrackLocalStaticRTP
-		if exists && activeCall != nil {
-			testAudioTrack = activeCall.AudioTrack
-		}
-		b.mu.Unlock()
-		
-		log.Printf("🎵 Starting continuous test audio generation for WhatsApp")
-		log.Printf("📊 WhatsApp audio track exists: %v", testAudioTrack != nil)
-		
-		if testAudioTrack == nil {
-			log.Printf("❌ No WhatsApp audio track available!")
-			return
-		}
-		
-		// Generate Opus-encoded silence
-		// TrackLocalStaticRTP.Write expects Opus-encoded data, not raw PCM
-		// For now, let's send minimal valid Opus frames
-		
-		// Use the same Opus frame format as the immediate audio
-		opusStereoSilence := []byte{
-			0xFC,       // TOC: CELT-only, stereo, 20ms  
-			0xFF, 0xFE, // Minimal CELT stereo silence frame
-		}
-		
-		ticker := time.NewTicker(20 * time.Millisecond)
-		defer ticker.Stop()
-		
-		packetCount := 0
-		for range ticker.C {
-			if _, err := testAudioTrack.Write(opusStereoSilence); err != nil {
-				log.Printf("❌ Error writing test audio after %d packets: %v", packetCount, err)
-				return
-			}
-			
-			packetCount++
-			if packetCount == 1 {
-				log.Printf("✅ Started sending test audio to WhatsApp")
-			} else if packetCount == 50 {
-				log.Printf("📊 Sent 1 second of test audio")
-			} else if packetCount == 250 {
-				log.Printf("📊 Sent 5 seconds of test audio")
-			} else if packetCount == 500 {
-				log.Printf("📊 Sent 10 seconds of test audio - WhatsApp should be sending audio by now")
-			}
-		}
-	}()
+	// Success! We're now receiving WhatsApp audio, so let's forward real OpenAI audio
+	// Remove the test audio generation since we have the real thing working
 	
-	// Still set up OpenAI forwarding but log when track is available
+	// Forward audio from OpenAI to WhatsApp (now that bidirectional audio works!)
 	go func() {
 		// Wait for OpenAI's remote audio track
 		for i := 0; i < 50; i++ { // Wait up to 5 seconds
 			if track := openAIClient.GetRemoteAudioTrack(); track != nil {
-				log.Printf("🔊 OpenAI audio track available but NOT forwarding (using test audio)")
+				log.Printf("🔊 Starting to forward OpenAI audio to WhatsApp")
 				log.Printf("📊 OpenAI track codec: %s, PayloadType: %d", track.Codec().MimeType, track.PayloadType())
 				
-				// Just drain the OpenAI audio to prevent buffer overflow
+				// Get the WhatsApp audio track
+				b.mu.Lock()
+				activeCall, exists := b.activeCalls[callID]
+				var whatsappTrack *webrtc.TrackLocalStaticRTP
+				if exists && activeCall != nil {
+					whatsappTrack = activeCall.AudioTrack
+				}
+				b.mu.Unlock()
+				
+				if whatsappTrack == nil {
+					log.Printf("❌ No WhatsApp track for OpenAI forwarding")
+					return
+				}
+				
+				// Forward OpenAI audio to WhatsApp
 				rtpBuf := make([]byte, 1400)
+				packetCount := 0
+				lastLogTime := time.Now()
+				
 				for {
-					_, _, readErr := track.Read(rtpBuf)
+					n, _, readErr := track.Read(rtpBuf)
 					if readErr != nil {
+						log.Printf("❌ Error reading OpenAI audio: %v", readErr)
 						return
+					}
+					
+					// Forward to WhatsApp
+					if _, writeErr := whatsappTrack.Write(rtpBuf[:n]); writeErr != nil {
+						log.Printf("❌ Error forwarding to WhatsApp: %v", writeErr)
+						return
+					}
+					
+					packetCount++
+					if packetCount == 1 {
+						log.Printf("✅ First OpenAI packet forwarded to WhatsApp!")
+					} else if time.Since(lastLogTime) > 3*time.Second {
+						log.Printf("📦 Forwarded %d OpenAI packets to WhatsApp", packetCount)
+						lastLogTime = time.Now()
 					}
 				}
 			}
