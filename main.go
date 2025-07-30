@@ -46,13 +46,14 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 	// Create a MediaEngine with audio codecs
 	m := &webrtc.MediaEngine{}
 	
-	// First register the Opus codec with WhatsApp's exact parameters
+	// First register the Opus codec with WhatsApp's EXACT parameters
 	opusCodec := webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
 			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1", // Basic Opus parameters
+			// Use WhatsApp's exact fmtp line from their SDP
+			SDPFmtpLine: "maxaveragebitrate=20000;maxplaybackrate=16000;minptime=20;sprop-maxcapturerate=16000;useinbandfec=1",
 			RTCPFeedback: []webrtc.RTCPFeedback{
 				{Type: "transport-cc"},
 			},
@@ -618,13 +619,14 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Create audio track first
+	// Create audio track with WhatsApp's exact codec parameters
 	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
 			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
+			// Match WhatsApp's exact fmtp line
+			SDPFmtpLine: "maxaveragebitrate=20000;maxplaybackrate=16000;minptime=20;sprop-maxcapturerate=16000;useinbandfec=1",
 		},
 		"audio",
 		"bridge-audio",
