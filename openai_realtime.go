@@ -204,7 +204,7 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			"type": "session.update",
 			"session": map[string]interface{}{
 				"modalities":     []string{"text", "audio"},
-				"instructions":   "You are a friendly German conversation partner for A1 level learners. Speak 70% English and 30% simple German. Use basic vocabulary only: greetings, numbers 1-20, colors, family members, days of the week, and simple daily activities. Always translate German phrases immediately after saying them. Speak slowly and clearly. Be very encouraging and patient. Ask simple questions like 'Wie heißt du?' (What's your name?) and help them respond.",
+				"instructions":   "You are a friendly German conversation partner for A1 level learners. Speak 70% English and 30% simple German. Use basic vocabulary only: greetings, numbers 1-20, colors, family members, days of the week, weather terms, and simple daily activities. Always translate German phrases immediately after saying them. Speak slowly and clearly. Be very encouraging and patient. Ask simple questions like 'Wie heißt du?' (What's your name?) or 'Wie ist das Wetter?' (How's the weather?). You can check real weather to practice weather vocabulary in German.",
 				"voice":         "alloy",
 				"input_audio_format":  "pcm16",
 				"output_audio_format": "pcm16",
@@ -219,6 +219,24 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 				},
 				"temperature": 0.8,
 				"max_response_output_tokens": 150,
+				"tools": []map[string]interface{}{
+					{
+						"type": "function",
+						"name": "get_weather",
+						"description": "Get the current weather for a location to discuss weather in German/English",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"location": map[string]interface{}{
+									"type": "string",
+									"description": "The city or location to get weather for",
+								},
+							},
+							"required": []string{"location"},
+						},
+					},
+				},
+				"tool_choice": "auto",
 			},
 		}
 		
@@ -274,6 +292,9 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			log.Println("🔇 Speech ended")
 		case "input_audio_buffer.committed":
 			log.Println("📤 Audio buffer committed to OpenAI")
+		case "response.function_call_arguments.done":
+			// Function call completed
+			c.handleFunctionCall(event)
 		case "error":
 			log.Printf("❌ OpenAI error: %+v", event)
 		default:
@@ -475,6 +496,76 @@ func (c *OpenAIRealtimeClient) TriggerResponse(text string) error {
 	
 	log.Printf("📤 Triggering OpenAI response: %s", text)
 	return c.dataChannel.SendText(string(eventJSON))
+}
+
+// handleFunctionCall processes function call requests from OpenAI
+func (c *OpenAIRealtimeClient) handleFunctionCall(event map[string]interface{}) {
+	log.Printf("🔧 Function call event: %+v", event)
+	
+	// Extract function name and arguments
+	functionName, _ := event["name"].(string)
+	arguments, _ := event["arguments"].(string)
+	callID, _ := event["call_id"].(string)
+	
+	log.Printf("📞 Function call: %s with args: %s", functionName, arguments)
+	
+	// Handle the weather function
+	if functionName == "get_weather" {
+		// Parse arguments
+		var args map[string]interface{}
+		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+			log.Printf("❌ Failed to parse function arguments: %v", err)
+			return
+		}
+		
+		location, _ := args["location"].(string)
+		log.Printf("🌤️ Getting weather for: %s", location)
+		
+		// Create mock weather response with German vocabulary
+		// Randomly select weather conditions for variety
+		conditions := []map[string]interface{}{
+			{"condition": "sonnig", "description": "Es ist sonnig und warm", "temp": 22},
+			{"condition": "bewölkt", "description": "Es ist bewölkt", "temp": 18},
+			{"condition": "regnerisch", "description": "Es regnet", "temp": 15},
+			{"condition": "kalt", "description": "Es ist kalt", "temp": 5},
+		}
+		
+		// Pick a random condition (simplified - just use first one for now)
+		weather := conditions[0]
+		
+		weatherResult := map[string]interface{}{
+			"location": location,
+			"temperature_celsius": weather["temp"],
+			"condition": weather["condition"],
+			"description": weather["description"],
+			"vocabulary": map[string]string{
+				"sonnig": "sunny",
+				"bewölkt": "cloudy", 
+				"regnerisch": "rainy",
+				"kalt": "cold",
+				"warm": "warm",
+			},
+		}
+		
+		resultJSON, _ := json.Marshal(weatherResult)
+		
+		// Send function result back
+		functionOutput := map[string]interface{}{
+			"type": "conversation.item.create",
+			"item": map[string]interface{}{
+				"type": "function_call_output",
+				"call_id": callID,
+				"output": string(resultJSON),
+			},
+		}
+		
+		outputJSON, _ := json.Marshal(functionOutput)
+		if err := c.dataChannel.SendText(string(outputJSON)); err != nil {
+			log.Printf("❌ Failed to send function output: %v", err)
+		} else {
+			log.Printf("✅ Sent weather data for %s", location)
+		}
+	}
 }
 
 // Close closes the connection to OpenAI
