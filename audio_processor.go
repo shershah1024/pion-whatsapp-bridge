@@ -57,17 +57,15 @@ func (p *AudioProcessor) ProcessRTPPacket(rtpData []byte) error {
 	p.lastSequence = packet.SequenceNumber
 	p.firstPacket = false
 
-	// For now, we'll forward the raw Opus payload
-	// In a production system, you'd decode Opus to PCM16 here
-	// The payload is already Opus-encoded audio from WhatsApp
-	opusData := packet.Payload
-
-	// OpenAI expects PCM16 audio, but for initial testing,
-	// let's try sending the Opus data and see if OpenAI handles it
-	// If not, we'll need to add an Opus decoder
-
+	// OpenAI expects PCM16 audio, not Opus
+	// For now, let's send silence PCM16 data to test the connection
+	// In production, we'd decode the Opus payload to PCM16
+	
+	// Generate 20ms of PCM16 silence (960 samples at 48kHz)
+	pcm16Data := generateSilencePCM16(20)
+	
 	// Convert to base64 (OpenAI expects base64-encoded audio)
-	audioBase64 := base64.StdEncoding.EncodeToString(opusData)
+	audioBase64 := base64.StdEncoding.EncodeToString(pcm16Data)
 
 	// Send to OpenAI via data channel
 	if err := p.openAIClient.SendAudioToOpenAI([]byte(audioBase64)); err != nil {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -1000,61 +1001,96 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	// Wait a moment for connections to stabilize
 	time.Sleep(500 * time.Millisecond)
 	
-	// Success! We're now receiving WhatsApp audio, so let's forward real OpenAI audio
-	// Remove the test audio generation since we have the real thing working
+	// Test with simple audio generation first to unlock WhatsApp audio
+	log.Printf("🧪 Starting test audio generation to unlock WhatsApp audio stream")
 	
-	// Forward audio from OpenAI to WhatsApp (now that bidirectional audio works!)
+	// Generate continuous Opus silence to activate WhatsApp's audio stream
 	go func() {
-		// Wait for OpenAI's remote audio track
-		for i := 0; i < 50; i++ { // Wait up to 5 seconds
-			if track := openAIClient.GetRemoteAudioTrack(); track != nil {
-				log.Printf("🔊 Starting to forward OpenAI audio to WhatsApp")
-				log.Printf("📊 OpenAI track codec: %s, PayloadType: %d", track.Codec().MimeType, track.PayloadType())
-				
-				// Get the WhatsApp audio track
-				b.mu.Lock()
-				activeCall, exists := b.activeCalls[callID]
-				var whatsappTrack *webrtc.TrackLocalStaticRTP
-				if exists && activeCall != nil {
-					whatsappTrack = activeCall.AudioTrack
+		// Use the same WhatsApp audio track
+		b.mu.Lock()
+		activeCall, exists := b.activeCalls[callID]
+		var whatsappTrack *webrtc.TrackLocalStaticRTP
+		if exists && activeCall != nil {
+			whatsappTrack = activeCall.AudioTrack
+		}
+		b.mu.Unlock()
+		
+		if whatsappTrack == nil {
+			log.Printf("❌ No WhatsApp track for test audio")
+			return
+		}
+		
+		// Generate Opus silence frames
+		// Opus frame for 20ms of silence at 48kHz
+		opusSilence := []byte{0xF8, 0xFF, 0xFE} // Opus silence frame
+		
+		// Create proper RTP packets
+		sequenceNumber := uint16(0)
+		timestamp := uint32(0)
+		ssrc := uint32(0x12345678) // Fixed SSRC
+		
+		ticker := time.NewTicker(20 * time.Millisecond) // 20ms intervals
+		defer ticker.Stop()
+		
+		packetCount := 0
+		startTime := time.Now()
+		
+		for {
+			select {
+			case <-ticker.C:
+				// Create RTP packet
+				pkt := &rtp.Packet{
+					Header: rtp.Header{
+						Version:        2,
+						PayloadType:    111, // Opus
+						SequenceNumber: sequenceNumber,
+						Timestamp:      timestamp,
+						SSRC:           ssrc,
+					},
+					Payload: opusSilence,
 				}
-				b.mu.Unlock()
 				
-				if whatsappTrack == nil {
-					log.Printf("❌ No WhatsApp track for OpenAI forwarding")
+				// Marshal to bytes
+				rtpData, err := pkt.Marshal()
+				if err != nil {
+					log.Printf("❌ Failed to marshal RTP packet: %v", err)
 					return
 				}
 				
-				// Forward OpenAI audio to WhatsApp
-				rtpBuf := make([]byte, 1400)
-				packetCount := 0
-				lastLogTime := time.Now()
+				// Send to WhatsApp
+				if _, writeErr := whatsappTrack.Write(rtpData); writeErr != nil {
+					log.Printf("❌ Error sending test audio: %v", writeErr)
+					return
+				}
 				
-				for {
-					n, _, readErr := track.Read(rtpBuf)
-					if readErr != nil {
-						log.Printf("❌ Error reading OpenAI audio: %v", readErr)
-						return
-					}
-					
-					// Forward to WhatsApp
-					if _, writeErr := whatsappTrack.Write(rtpBuf[:n]); writeErr != nil {
-						log.Printf("❌ Error forwarding to WhatsApp: %v", writeErr)
-						return
-					}
-					
-					packetCount++
-					if packetCount == 1 {
-						log.Printf("✅ First OpenAI packet forwarded to WhatsApp!")
-					} else if time.Since(lastLogTime) > 3*time.Second {
-						log.Printf("📦 Forwarded %d OpenAI packets to WhatsApp", packetCount)
-						lastLogTime = time.Now()
-					}
+				sequenceNumber++
+				timestamp += 960 // 20ms at 48kHz = 960 samples
+				packetCount++
+				
+				if packetCount == 1 {
+					log.Printf("✅ First test audio packet sent to WhatsApp!")
+				} else if packetCount%100 == 0 {
+					elapsed := time.Since(startTime)
+					log.Printf("📦 Sent %d test packets (%.1f seconds of silence)", packetCount, elapsed.Seconds())
+				}
+				
+				// After 2 seconds, also try forwarding OpenAI audio if available
+				if packetCount == 100 { // After 2 seconds
+					go func() {
+						// Wait for OpenAI's remote audio track
+						for i := 0; i < 30; i++ { // Wait up to 3 seconds
+							if track := openAIClient.GetRemoteAudioTrack(); track != nil {
+								log.Printf("🔊 OpenAI audio available, starting mixed mode")
+								// Continue with silence but log that OpenAI is available
+								return
+							}
+							time.Sleep(100 * time.Millisecond)
+						}
+						log.Printf("⚠️ OpenAI audio track not available after 3 seconds")
+					}()
 				}
 			}
-			time.Sleep(100 * time.Millisecond)
 		}
-		log.Printf("⚠️ OpenAI audio track not available after 5 seconds")
 	}()
 	
 	// The OnTrack handler is already set up in acceptIncomingCall
