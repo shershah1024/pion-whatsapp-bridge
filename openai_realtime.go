@@ -143,16 +143,8 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 		return fmt.Errorf("failed to create data channel: %v", err)
 	}
 	
-	// Add audio transceiver to ensure audio section in SDP
-	// This is crucial for OpenAI to accept our offer
-	_, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
-		Direction: webrtc.RTPTransceiverDirectionSendrecv,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to add audio transceiver: %v", err)
-	}
-	
 	// Create audio track for sending audio to OpenAI
+	// This must be done BEFORE creating the transceiver
 	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
 			MimeType:     webrtc.MimeTypeOpus,
@@ -167,17 +159,28 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 		return fmt.Errorf("failed to create audio track: %v", err)
 	}
 	
-	// Add the audio track to the peer connection
-	rtpSender, err := pc.AddTrack(audioTrack)
+	// Add transceiver from track - this is the correct way for OpenAI
+	// This combines track creation and transceiver setup
+	transceiver, err := pc.AddTransceiverFromTrack(audioTrack, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionSendrecv,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to add audio track: %v", err)
+		return fmt.Errorf("failed to add audio transceiver from track: %v", err)
 	}
+	
+	log.Printf("✅ Added audio transceiver from track with direction: %v", transceiver.Direction())
 	
 	// Read incoming RTCP packets (required for audio to work properly)
 	go func() {
 		rtcpBuf := make([]byte, 1500)
+		// Get the sender from the transceiver
+		sender := transceiver.Sender()
+		if sender == nil {
+			log.Printf("⚠️ No sender available for RTCP reading")
+			return
+		}
 		for {
-			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+			if _, _, rtcpErr := sender.Read(rtcpBuf); rtcpErr != nil {
 				return
 			}
 		}
@@ -201,7 +204,7 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			"type": "session.update",
 			"session": map[string]interface{}{
 				"modalities":     []string{"text", "audio"},
-				"instructions":   "You are a helpful AI assistant on a phone call. Please help the caller with their questions. Be conversational and friendly.",
+				"instructions":   "You are a helpful AI assistant on a phone call. Please help the caller with their questions. Be conversational and friendly. Respond to audio input with audio output.",
 				"voice":         "alloy",
 				"input_audio_format":  "pcm16",
 				"output_audio_format": "pcm16",
@@ -214,6 +217,8 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 					"prefix_padding_ms": 300,
 					"silence_duration_ms": 200,
 				},
+				"temperature": 0.8,
+				"max_output_tokens": 150,
 			},
 		}
 		
