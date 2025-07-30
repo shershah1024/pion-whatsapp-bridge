@@ -475,59 +475,59 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 			return
 		}
 		
-		// Forward audio to OpenAI if client exists
-		if activeCall.OpenAIClient != nil {
-			log.Printf("🔄 Starting WhatsApp->OpenAI audio forwarding for existing client")
-			go func() {
-				buf := make([]byte, 1400)
-				packetCount := 0
-				totalBytes := 0
-				for {
-					n, _, readErr := track.Read(buf)
-					if readErr != nil {
-						log.Printf("❌ Error reading audio after %d packets: %v", packetCount, readErr)
-						return
+		// Start reading audio packets and dynamically check for OpenAI client
+		go func() {
+			buf := make([]byte, 1400)
+			packetCount := 0
+			totalBytes := 0
+			openAIForwardingStarted := false
+			
+			for {
+				n, _, readErr := track.Read(buf)
+				if readErr != nil {
+					log.Printf("❌ Error reading audio after %d packets: %v", packetCount, readErr)
+					return
+				}
+				
+				packetCount++
+				totalBytes += n
+				
+				// Check for OpenAI client on every packet (it might become available later)
+				b.mu.Lock()
+				activeCall, exists := b.activeCalls[callID]
+				var openAIClient *OpenAIRealtimeClient
+				if exists && activeCall != nil {
+					openAIClient = activeCall.OpenAIClient
+				}
+				b.mu.Unlock()
+				
+				if openAIClient != nil {
+					// OpenAI client is available - forward the packet
+					if !openAIForwardingStarted {
+						log.Printf("🔄 OpenAI client now available - starting WhatsApp->OpenAI forwarding")
+						openAIForwardingStarted = true
 					}
 					
-					totalBytes += n
-					
-					// Forward to OpenAI
-					if err := activeCall.OpenAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
-						if packetCount == 0 {
+					if err := openAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
+						if packetCount <= 3 { // Only log first few errors
 							log.Printf("❌ Error forwarding to OpenAI: %v", err)
 						}
-					} else {
-						packetCount++
+					} else if packetCount == 1 || (openAIForwardingStarted && packetCount%100 == 0) {
 						if packetCount == 1 {
 							log.Printf("✅ First WhatsApp audio packet forwarded to OpenAI!")
-						} else if packetCount%100 == 0 {
+						} else {
 							log.Printf("📦 Forwarded %d WhatsApp packets (%d KB) to OpenAI", 
 								packetCount, totalBytes/1024)
 						}
 					}
-				}
-			}()
-		} else {
-			// Just count packets if no OpenAI client yet
-			go func() {
-				buf := make([]byte, 1400)
-				packetCount := 0
-				totalBytes := 0
-				for {
-					n, _, readErr := track.Read(buf)
-					if readErr != nil {
-						log.Printf("❌ Error reading audio: %v", readErr)
-						return
-					}
-					
-					packetCount++
-					totalBytes += n
+				} else {
+					// OpenAI client not ready yet - just count packets
 					if packetCount%100 == 0 {
-						log.Printf("🎤 Received %d audio packets (total: %d bytes, last packet: %d bytes)", packetCount, totalBytes, n)
+						log.Printf("🎤 Received %d audio packets (total: %d bytes, last packet: %d bytes) - waiting for OpenAI", packetCount, totalBytes, n)
 					}
 				}
-			}()
-		}
+			}
+		}()
 	})
 	
 	// Clean and validate the SDP
