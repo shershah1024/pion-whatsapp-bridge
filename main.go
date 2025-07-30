@@ -865,11 +865,13 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	}
 	
 	// Create audio track for sending OpenAI's audio to WhatsApp
-	// Use telephone-event which is what WhatsApp expects
+	// Use Opus codec which is what WhatsApp uses for actual audio
 	whatsappAudioTrack, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
-			MimeType:  "audio/telephone-event",
-			ClockRate: 8000,
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
 		},
 		"audio",
 		"openai-to-whatsapp",
