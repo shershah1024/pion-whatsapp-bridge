@@ -1,6 +1,6 @@
 # Current Status - WhatsApp Pion Bridge
 
-## Last Updated: July 30, 2025, 01:25 AM
+## Last Updated: July 30, 2025, 01:35 AM
 
 ### Issue Summary
 The main blocker is a codec mismatch error when trying to establish bidirectional audio with WhatsApp.
@@ -15,9 +15,15 @@ WhatsApp uses Opus with very specific parameters:
 - `maxplaybackrate=16000` 
 - `sprop-maxcapturerate=16000`
 - `maxaveragebitrate=20000`
-- `minptime=20`
+- `minptime=20` (not 10!)
 
 When we add a standard Opus track before setting the remote description, Pion can't match these parameters and throws a codec mismatch error.
+
+### Latest Fix Applied (commit a4e663d)
+Updated both the media engine codec registration and track creation to use WhatsApp's exact parameters:
+```go
+SDPFmtpLine: "minptime=20;useinbandfec=1;maxplaybackrate=16000;sprop-maxcapturerate=16000;maxaveragebitrate=20000"
+```
 
 ### Attempted Solutions
 
@@ -36,16 +42,21 @@ When we add a standard Opus track before setting the remote description, Pion ca
    - Use transceiver to ensure sendrecv in SDP
 
 ### Current Code Status
-- Latest code uses transceiver approach without initial track
-- Deployment might be pending on Railway
-- Logs show old code still running (direct track addition)
+- Latest code uses transceiver approach without initial track ✅
+- Fixed codec parameters to match WhatsApp exactly (commit a4e663d) ✅
+- Added enhanced logging for transceiver state ✅
+- Deployed to Railway with auto-deploy enabled ✅
 
 ### Next Steps
-1. Wait for Railway to deploy latest code
-2. Test with transceiver approach
-3. Verify logs show "Added audio transceiver for bidirectional audio (no track yet)"
-4. Check if SDP contains sendrecv
+1. Wait for Railway to deploy latest code with codec fixes (~1-2 minutes)
+2. Test a WhatsApp call
+3. Verify logs show:
+   - "Added audio transceiver for bidirectional audio (no track yet)"
+   - "Transceiver direction: sendrecv"
+   - NO codec mismatch errors
+4. Check if SDP contains `a=sendrecv` (not `a=recvonly`)
 5. Monitor for "Received audio track" when WhatsApp sends audio
+6. Verify bidirectional audio flow works
 
 ### Expected Success Flow
 1. Receive WhatsApp call with SDP offer
