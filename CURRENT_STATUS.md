@@ -1,29 +1,32 @@
 # Current Status - WhatsApp Pion Bridge
 
-## Last Updated: July 30, 2025, 01:35 AM
+## Last Updated: July 30, 2025, 02:00 AM
 
 ### Issue Summary
-The main blocker is a codec mismatch error when trying to establish bidirectional audio with WhatsApp.
+✅ Connection established - calls connect successfully
+✅ OpenAI integration works - receiving audio and transcripts
+❌ No bidirectional audio - WhatsApp doesn't send us audio
+❌ Call disconnects after ~20 seconds due to no valid audio
 
-### Error Details
-```
-❌ Failed to set local description: unable to start track, codec is not supported by remote
-```
+### Current Behavior
+1. **OpenAI → WhatsApp**: 
+   - ✅ Packets are being forwarded (1000+ packets)
+   - ❌ WhatsApp doesn't recognize the audio (call disconnects after 20s)
 
-### Root Cause
-WhatsApp uses Opus with very specific parameters:
-- `maxplaybackrate=16000` 
-- `sprop-maxcapturerate=16000`
-- `maxaveragebitrate=20000`
-- `minptime=20` (not 10!)
+2. **WhatsApp → OpenAI**:
+   - ❌ OnTrack handler never called
+   - ❌ No "Received audio track for call" in logs
+   - ❌ WhatsApp not sending us audio
 
-When we add a standard Opus track before setting the remote description, Pion can't match these parameters and throws a codec mismatch error.
+### Root Cause Analysis
+1. **WhatsApp waits for valid audio** before sending its own audio stream
+2. **Forwarded OpenAI packets** might have wrong format/timestamps/SSRC
+3. **SDP direction** might still be incorrect (need to verify sendrecv)
 
-### Latest Fix Applied (commit a4e663d)
-Updated both the media engine codec registration and track creation to use WhatsApp's exact parameters:
-```go
-SDPFmtpLine: "minptime=20;useinbandfec=1;maxplaybackrate=16000;sprop-maxcapturerate=16000;maxaveragebitrate=20000"
-```
+### Latest Fixes Applied
+- ✅ Fixed codec mismatch by using AddTransceiverFromTrack (commit 7d27303)
+- ✅ Added initial audio burst to activate bidirectional flow (commit eca9bac)
+- ✅ Improved packet forwarding logging
 
 ### Attempted Solutions
 
@@ -47,16 +50,27 @@ SDPFmtpLine: "minptime=20;useinbandfec=1;maxplaybackrate=16000;sprop-maxcapturer
 - Added enhanced logging for transceiver state ✅
 - Deployed to Railway with auto-deploy enabled ✅
 
-### Next Steps
-1. Wait for Railway to deploy latest code with codec fixes (~1-2 minutes)
-2. Test a WhatsApp call
-3. Verify logs show:
-   - "Added audio transceiver for bidirectional audio (no track yet)"
-   - "Transceiver direction: sendrecv"
-   - NO codec mismatch errors
-4. Check if SDP contains `a=sendrecv` (not `a=recvonly`)
-5. Monitor for "Received audio track" when WhatsApp sends audio
-6. Verify bidirectional audio flow works
+### Next Steps to Debug
+
+1. **Verify SDP Direction**
+   - Check logs for "SDP contains sendrecv" message
+   - If it shows recvonly, we need to fix transceiver setup
+
+2. **Test Simple Audio Generation**
+   - Instead of forwarding OpenAI packets, generate a continuous tone
+   - This will verify if WhatsApp accepts our audio format
+
+3. **Check RTP Packet Format**
+   - Log first few bytes of RTP packets from OpenAI
+   - Verify SSRC, timestamp, and payload type match WhatsApp expectations
+
+4. **Alternative Approach: Sample-based forwarding**
+   - OpenAI might be sending Opus frames that need repackaging
+   - Try using pion/rtp to properly handle RTP packet forwarding
+
+5. **Debug WhatsApp Requirements**
+   - WhatsApp might need specific RTP extensions
+   - Check if we need to handle RTCP feedback
 
 ### Expected Success Flow
 1. Receive WhatsApp call with SDP offer
@@ -74,6 +88,19 @@ All properly configured:
 - ✅ PHONE_NUMBER_ID (106382542433515)
 - ✅ VERIFY_TOKEN
 - ✅ OPENAI_API_KEY
+
+### Quick Fix to Try
+Instead of forwarding raw RTP packets, try generating a test tone:
+```go
+// Replace packet forwarding with tone generation
+ticker := time.NewTicker(20 * time.Millisecond)
+for range ticker.C {
+    testData := make([]byte, 960) // Simple silence
+    whatsappAudioTrack.Write(testData)
+}
+```
+
+This will help identify if the issue is with packet forwarding or audio format.
 
 ### Deployment
 - Platform: Railway
