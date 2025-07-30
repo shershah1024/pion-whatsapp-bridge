@@ -15,6 +15,7 @@ type AudioProcessor struct {
 	openAIClient      *OpenAIRealtimeClient
 	rtpBuffer         []byte
 	pcmBuffer         []byte
+	audioBuffer       []byte  // Accumulated audio to send
 	lastCommitTime    time.Time
 	mu                sync.Mutex
 	packetCount       int
@@ -30,6 +31,7 @@ func NewAudioProcessor(client *OpenAIRealtimeClient) *AudioProcessor {
 		openAIClient:   client,
 		rtpBuffer:      make([]byte, 1500),
 		pcmBuffer:      make([]byte, 0, 48000), // 1 second buffer at 48kHz
+		audioBuffer:    make([]byte, 0, 96000), // Buffer for accumulating audio before sending
 		lastCommitTime: time.Now(),
 		stopChan:       make(chan bool),
 		firstPacket:    true,
@@ -64,34 +66,41 @@ func (p *AudioProcessor) ProcessRTPPacket(rtpData []byte) error {
 	// Generate 20ms of PCM16 silence (960 samples at 48kHz)
 	pcm16Data := generateSilencePCM16(20)
 	
-	// Convert to base64 (OpenAI expects base64-encoded audio)
-	audioBase64 := base64.StdEncoding.EncodeToString(pcm16Data)
-
-	// Send to OpenAI via data channel
-	if err := p.openAIClient.SendAudioToOpenAI([]byte(audioBase64)); err != nil {
-		if p.packetCount < 5 {
-			log.Printf("❌ Failed to send audio to OpenAI: %v", err)
-		}
-		return err
-	}
-
+	// Accumulate audio in buffer
+	p.audioBuffer = append(p.audioBuffer, pcm16Data...)
+	
 	p.packetCount++
 	if p.packetCount == 1 {
-		log.Printf("✅ First audio packet sent to OpenAI data channel!")
-	} else if p.packetCount%100 == 0 {
-		log.Printf("📊 Sent %d audio packets to OpenAI via data channel", p.packetCount)
+		log.Printf("✅ First audio packet received from WhatsApp!")
 	}
 
-	// Commit buffer periodically (every 100ms)
-	if time.Since(p.lastCommitTime) > 100*time.Millisecond {
+	// Send accumulated audio every 100ms (5 packets of 20ms each)
+	if len(p.audioBuffer) >= 9600 { // 100ms of audio at 48kHz, 16-bit mono = 9600 bytes
+		// Convert accumulated audio to base64
+		audioBase64 := base64.StdEncoding.EncodeToString(p.audioBuffer)
+		
+		// Send to OpenAI
+		if err := p.openAIClient.SendAudioToOpenAI([]byte(audioBase64)); err != nil {
+			if p.packetCount < 10 {
+				log.Printf("❌ Failed to send audio to OpenAI: %v", err)
+			}
+			return err
+		}
+		
+		// Commit the buffer
 		if err := p.openAIClient.CommitAudioBuffer(); err != nil {
 			log.Printf("❌ Failed to commit audio buffer: %v", err)
 		} else {
-			if p.packetCount < 1000 { // Log first few commits
-				log.Printf("✅ Committed audio buffer to OpenAI")
-			}
+			log.Printf("✅ Sent and committed %d bytes of audio to OpenAI", len(p.audioBuffer))
 		}
+		
+		// Clear the buffer for next batch
+		p.audioBuffer = p.audioBuffer[:0]
 		p.lastCommitTime = time.Now()
+	}
+	
+	if p.packetCount%100 == 0 {
+		log.Printf("📊 Processed %d packets from WhatsApp", p.packetCount)
 	}
 	
 	// After 3 seconds, trigger a manual response if we haven't heard anything
