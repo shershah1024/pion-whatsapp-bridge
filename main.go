@@ -605,19 +605,13 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Create audio track for sending audio to WhatsApp
-	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{
-			MimeType:    webrtc.MimeTypeOpus,
-			ClockRate:   48000,
-			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
-		},
-		"audio",
-		"bridge-audio",
-	)
+	// Add a transceiver to ensure sendrecv in the SDP
+	// Don't add a track yet to avoid codec mismatch
+	_, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionSendrecv,
+	})
 	if err != nil {
-		log.Printf("❌ Failed to create audio track: %v", err)
+		log.Printf("❌ Failed to add audio transceiver: %v", err)
 		b.mu.Lock()
 		delete(b.activeCalls, callID)
 		b.mu.Unlock()
@@ -627,33 +621,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Add track directly to peer connection
-	rtpSender, err := pc.AddTrack(audioTrack)
-	if err != nil {
-		log.Printf("❌ Failed to add audio track: %v", err)
-		b.mu.Lock()
-		delete(b.activeCalls, callID)
-		b.mu.Unlock()
-		if pc != nil {
-			pc.Close()
-		}
-		return
-	}
-	
-	// Read incoming RTCP packets
-	go func() {
-		rtcpBuf := make([]byte, 1500)
-		for {
-			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-				return
-			}
-		}
-	}()
-	
-	// Store the track for later use
-	call.AudioTrack = audioTrack
-	
-	log.Printf("✅ Added audio track directly to peer connection for bidirectional audio")
+	log.Printf("✅ Added audio transceiver for bidirectional audio (no track yet)")
 	
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
@@ -750,27 +718,66 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	iceState := pc.ICEConnectionState()
 	log.Printf("📊 Connection states - PC: %s, ICE: %s", connectionState.String(), iceState.String())
 	
-	// Start sending silence to activate the media flow
-	// According to WhatsApp diagram, connection becomes active on first packet
+	// Add audio track after connection is established
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
+		
+		// Find the audio transceiver
+		var audioTransceiver *webrtc.RTPTransceiver
+		for _, t := range pc.GetTransceivers() {
+			if t.Kind() == webrtc.RTPCodecTypeAudio {
+				audioTransceiver = t
+				break
+			}
+		}
+		
+		if audioTransceiver == nil {
+			log.Printf("❌ No audio transceiver found")
+			return
+		}
+		
+		// Create audio track matching WhatsApp's codec
+		audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+			webrtc.RTPCodecCapability{
+				MimeType:    webrtc.MimeTypeOpus,
+				ClockRate:   48000,
+				Channels:    2,
+				SDPFmtpLine: "minptime=10;useinbandfec=1",
+			},
+			"audio",
+			"bridge-audio",
+		)
+		if err != nil {
+			log.Printf("❌ Failed to create audio track: %v", err)
+			return
+		}
+		
+		// Replace the transceiver's track
+		if err := audioTransceiver.Sender().ReplaceTrack(audioTrack); err != nil {
+			log.Printf("❌ Failed to replace track: %v", err)
+			return
+		}
+		
+		// Store the track
 		b.mu.Lock()
-		track := call.AudioTrack
+		if c, exists := b.activeCalls[callID]; exists {
+			c.AudioTrack = audioTrack
+		}
 		b.mu.Unlock()
 		
-		if track != nil {
-			log.Printf("🔇 Sending silence packets to activate media flow")
-			// Send a few silence packets to activate the connection
-			silencePacket := make([]byte, 160) // 10ms of silence at 16kHz
-			for i := 0; i < 10; i++ {
-				if _, err := track.Write(silencePacket); err != nil {
-					log.Printf("❌ Error sending silence: %v", err)
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
+		log.Printf("✅ Added audio track to transceiver")
+		
+		// Send silence to activate the connection
+		log.Printf("🔇 Sending silence packets to activate media flow")
+		silencePacket := make([]byte, 160) // 10ms of silence
+		for i := 0; i < 10; i++ {
+			if _, err := audioTrack.Write(silencePacket); err != nil {
+				log.Printf("❌ Error sending silence: %v", err)
+				break
 			}
-			log.Printf("✅ Sent initial silence packets")
+			time.Sleep(10 * time.Millisecond)
 		}
+		log.Printf("✅ Sent initial silence packets")
 	}()
 	
 	// Now that the call is accepted, start media flow
