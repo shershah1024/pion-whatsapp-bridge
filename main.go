@@ -607,7 +607,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	// Add a transceiver for bidirectional audio
 	// This ensures our SDP has sendrecv instead of recvonly
-	_, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+	transceiver, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionSendrecv,
 	})
 	if err != nil {
@@ -621,10 +621,48 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	log.Printf("✅ Added audio transceiver for bidirectional audio")
+	// Create a dummy audio track to attach to the transceiver
+	// This should ensure sendrecv in the SDP
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		"audio",
+		"bridge-audio",
+	)
+	if err != nil {
+		log.Printf("❌ Failed to create audio track: %v", err)
+		b.mu.Lock()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
+		if pc != nil {
+			pc.Close()
+		}
+		return
+	}
 	
-	// We'll add the actual track later to avoid codec issues
-	// For now, just having the transceiver ensures sendrecv in SDP
+	// Add the track via the transceiver's sender
+	if err := transceiver.Sender().ReplaceTrack(audioTrack); err != nil {
+		log.Printf("❌ Failed to set track on transceiver: %v", err)
+		b.mu.Lock()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
+		if pc != nil {
+			pc.Close()
+		}
+		return
+	}
+	
+	// Store the track for later use
+	call.AudioTrack = audioTrack
+	
+	log.Printf("✅ Added audio transceiver with track for bidirectional audio")
+	
+	// Log transceiver state
+	log.Printf("📊 Transceiver direction: %s", transceiver.Direction().String())
 	
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
@@ -850,51 +888,21 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	}
 	b.mu.Unlock()
 	
-	// Find the audio transceiver we created earlier
-	var audioSender *webrtc.RTPSender
-	for _, transceiver := range whatsappPC.GetTransceivers() {
-		if transceiver.Kind() == webrtc.RTPCodecTypeAudio {
-			audioSender = transceiver.Sender()
-			break
-		}
-	}
-	
-	if audioSender == nil {
-		log.Printf("❌ No audio transceiver found on WhatsApp connection")
-		return
-	}
-	
-	// Create audio track for sending OpenAI's audio to WhatsApp
-	// Use Opus codec which is what WhatsApp uses for actual audio
-	whatsappAudioTrack, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{
-			MimeType:    webrtc.MimeTypeOpus,
-			ClockRate:   48000,
-			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
-		},
-		"audio",
-		"openai-to-whatsapp",
-	)
-	if err != nil {
-		log.Printf("❌ Failed to create audio track for WhatsApp: %v", err)
-		return
-	}
-	
-	// Replace the transceiver's track
-	if err := audioSender.ReplaceTrack(whatsappAudioTrack); err != nil {
-		log.Printf("❌ Failed to replace audio track: %v", err)
-		return
-	}
-	
-	// Store the audio track in the call
+	// Get the audio track we already created
 	b.mu.Lock()
-	if call, exists := b.activeCalls[callID]; exists {
-		call.AudioTrack = whatsappAudioTrack
+	call, exists := b.activeCalls[callID]
+	var whatsappAudioTrack *webrtc.TrackLocalStaticRTP
+	if exists && call != nil {
+		whatsappAudioTrack = call.AudioTrack
 	}
 	b.mu.Unlock()
 	
-	log.Printf("✅ Replaced transceiver track for OpenAI audio")
+	if whatsappAudioTrack == nil {
+		log.Printf("❌ No audio track found on WhatsApp connection")
+		return
+	}
+	
+	log.Printf("✅ Using existing audio track for OpenAI->WhatsApp audio")
 	
 	// Wait a moment for connections to stabilize
 	time.Sleep(500 * time.Millisecond)
