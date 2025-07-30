@@ -691,10 +691,21 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		log.Printf("⚠️ WARNING: SDP contains sendonly - only send audio!")
 	} else {
 		log.Printf("⚠️ WARNING: No explicit direction attribute found in SDP")
+		// If no direction is specified, sendrecv is the default, so add it explicitly
+		log.Printf("📝 Note: When no direction is specified, sendrecv is the default behavior")
 	}
 	
 	// Also check for audio media line
-	if !strings.Contains(answer.SDP, "m=audio") {
+	if strings.Contains(answer.SDP, "m=audio") {
+		// Extract the audio line
+		lines := strings.Split(answer.SDP, "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "m=audio") {
+				log.Printf("📊 Audio media line: %s", strings.TrimSpace(line))
+				break
+			}
+		}
+	} else {
 		log.Printf("❌ WARNING: No audio media line in SDP!")
 	}
 	
@@ -755,28 +766,41 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	iceState := pc.ICEConnectionState()
 	log.Printf("📊 Connection states - PC: %s, ICE: %s", connectionState.String(), iceState.String())
 	
-	// Start sending initial audio to activate the bidirectional flow
+	// Start sending continuous audio immediately to keep connection alive
 	go func() {
-		time.Sleep(500 * time.Millisecond) // Wait for connection to stabilize
+		time.Sleep(100 * time.Millisecond) // Very short delay
 		
-		log.Printf("🔊 Sending initial audio burst to activate WhatsApp audio flow")
+		log.Printf("🔊 Starting IMMEDIATE continuous audio to WhatsApp")
 		
-		// Send a short tone or silence burst
-		// Using proper Opus frame size (20ms = 960 samples at 48kHz)
-		frameSize := 960
-		silenceFrame := make([]byte, frameSize)
+		// Minimal Opus frame for silence
+		opusFrame := []byte{0xFC, 0x00, 0x00}
 		
-		// Send 1 second of audio (50 frames of 20ms each)
-		for i := 0; i < 50; i++ {
-			if _, err := audioTrack.Write(silenceFrame); err != nil {
-				log.Printf("❌ Error sending initial audio: %v", err)
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		
+		packetCount := 0
+		startTime := time.Now()
+		
+		for range ticker.C {
+			if _, err := audioTrack.Write(opusFrame); err != nil {
+				log.Printf("❌ Error sending audio after %d packets: %v", packetCount, err)
 				return
 			}
-			time.Sleep(20 * time.Millisecond)
+			
+			packetCount++
+			if packetCount == 1 {
+				log.Printf("✅ First audio packet sent to WhatsApp")
+			} else if packetCount == 50 {
+				log.Printf("📊 1 second of audio sent")
+			} else if packetCount == 250 {
+				log.Printf("📊 5 seconds of audio sent")
+			} else if packetCount == 500 {
+				log.Printf("📊 10 seconds of audio sent - call should stay alive")
+			} else if packetCount == 1000 {
+				elapsed := time.Since(startTime)
+				log.Printf("📊 20 seconds of audio sent (elapsed: %v) - call should definitely stay alive", elapsed)
+			}
 		}
-		
-		log.Printf("✅ Sent 1 second of initial audio to WhatsApp")
-		log.Printf("🎤 Waiting for WhatsApp to start sending audio...")
 	}()
 	
 	// Now that the call is accepted, start media flow
