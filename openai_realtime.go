@@ -204,7 +204,7 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			"type": "session.update",
 			"session": map[string]interface{}{
 				"modalities":     []string{"text", "audio"},
-				"instructions":   "You are a helpful AI assistant on a phone call. Please help the caller with their questions. Be conversational and friendly. Respond to audio input with audio output.",
+				"instructions":   "You are a friendly German language tutor for beginners. Speak primarily in English but introduce German phrases one at a time. Always give the English meaning first, then the German phrase, followed by pronunciation help. Focus on basic greetings and introductions. Be encouraging and patient.",
 				"voice":         "alloy",
 				"input_audio_format":  "pcm16",
 				"output_audio_format": "pcm16",
@@ -218,7 +218,7 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 					"silence_duration_ms": 200,
 				},
 				"temperature": 0.8,
-				"max_output_tokens": 150,
+				"max_response_output_tokens": 150,
 			},
 		}
 		
@@ -247,7 +247,7 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			// Trigger a welcome message
 			go func() {
 				time.Sleep(500 * time.Millisecond)
-				if err := c.TriggerResponse("Hello! I'm an AI assistant. How can I help you today?"); err != nil {
+				if err := c.TriggerResponse("Hello! I'm your German language tutor. Let's learn some German together! To say 'hello' in German, we say 'Hallo' - pronounced HAH-loh. Can you try saying Hallo?"); err != nil {
 					log.Printf("❌ Failed to send welcome message: %v", err)
 				}
 			}()
