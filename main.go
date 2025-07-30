@@ -766,31 +766,85 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 	}
 	b.mu.Unlock()
 	
-	// Set up audio forwarding from WhatsApp to OpenAI
-	whatsappPC.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Printf("🎤 Forwarding audio from WhatsApp to OpenAI")
-		
-		// Read RTP packets from WhatsApp
-		go func() {
-			buf := make([]byte, 1400)
-			for {
-				n, _, readErr := track.Read(buf)
-				if readErr != nil {
-					return
+	// Create audio track for sending OpenAI's audio to WhatsApp
+	openAIToWhatsAppTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+		"audio",
+		"openai-to-whatsapp",
+	)
+	if err != nil {
+		log.Printf("❌ Failed to create audio track for WhatsApp: %v", err)
+		return
+	}
+	
+	// Add the track to WhatsApp peer connection
+	if _, err := whatsappPC.AddTrack(openAIToWhatsAppTrack); err != nil {
+		log.Printf("❌ Failed to add audio track to WhatsApp: %v", err)
+		return
+	}
+	
+	// Wait a moment for connections to stabilize
+	time.Sleep(500 * time.Millisecond)
+	
+	// Forward audio from OpenAI to WhatsApp
+	go func() {
+		// Wait for OpenAI's remote audio track
+		for i := 0; i < 50; i++ { // Wait up to 5 seconds
+			if track := openAIClient.GetRemoteAudioTrack(); track != nil {
+				log.Printf("🔊 Starting to forward audio from OpenAI to WhatsApp")
+				buf := make([]byte, 1400)
+				for {
+					n, _, readErr := track.Read(buf)
+					if readErr != nil {
+						log.Printf("❌ Error reading from OpenAI: %v", readErr)
+						return
+					}
+					
+					// Forward to WhatsApp
+					if _, writeErr := openAIToWhatsAppTrack.Write(buf[:n]); writeErr != nil {
+						log.Printf("❌ Error writing to WhatsApp: %v", writeErr)
+						return
+					}
 				}
-				
-				// Forward audio to OpenAI
-				// Note: This would need proper RTP to PCM conversion
-				// For now, just log that we would forward
-				log.Printf("🔊 Would forward %d bytes to OpenAI", n)
-				
-				// In a real implementation:
-				// 1. Extract PCM audio from RTP packets
-				// 2. Convert to base64
-				// 3. Send to OpenAI via openAIClient.SendAudioToOpenAI()
 			}
-		}()
-	})
+			time.Sleep(100 * time.Millisecond)
+		}
+		log.Printf("⚠️ OpenAI audio track not available after 5 seconds")
+	}()
+	
+	// Forward audio from WhatsApp to OpenAI (this replaces the OnTrack handler)
+	// We need to find existing tracks that might already be set up
+	for _, transceiver := range whatsappPC.GetTransceivers() {
+		if transceiver.Receiver() != nil && transceiver.Kind() == webrtc.RTPCodecTypeAudio {
+			track := transceiver.Receiver().Track()
+			if track != nil {
+				log.Printf("🎤 Found existing WhatsApp audio track, starting forwarding to OpenAI")
+				go func(track *webrtc.TrackRemote) {
+					buf := make([]byte, 1400)
+					packetCount := 0
+					for {
+						n, _, readErr := track.Read(buf)
+						if readErr != nil {
+							log.Printf("❌ Error reading from WhatsApp: %v", readErr)
+							return
+						}
+						
+						// Forward RTP packet directly to OpenAI
+						if err := openAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
+							if packetCount == 0 {
+								log.Printf("❌ Error forwarding to OpenAI: %v", err)
+							}
+						} else {
+							packetCount++
+							if packetCount%100 == 0 {
+								log.Printf("📦 Forwarded %d packets from WhatsApp to OpenAI", packetCount)
+							}
+						}
+					}
+				}(track)
+			}
+		}
+	}
 	
 	log.Printf("✅ OpenAI Realtime connection established for call %s", callID)
 }

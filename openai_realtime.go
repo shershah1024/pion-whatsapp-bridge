@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/pion/webrtc/v3"
@@ -14,10 +15,12 @@ import (
 
 // OpenAIRealtimeClient handles the connection to OpenAI's Realtime API
 type OpenAIRealtimeClient struct {
-	apiKey         string
-	peerConnection *webrtc.PeerConnection
-	dataChannel    *webrtc.DataChannel
-	ephemeralToken string
+	apiKey           string
+	peerConnection   *webrtc.PeerConnection
+	dataChannel      *webrtc.DataChannel
+	ephemeralToken   string
+	audioTrack       *webrtc.TrackLocalStaticRTP
+	remoteAudioTrack *webrtc.TrackRemote
 }
 
 // NewOpenAIRealtimeClient creates a new OpenAI Realtime client
@@ -86,7 +89,28 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 
 // ConnectToRealtimeAPI establishes a WebRTC connection to OpenAI's Realtime API
 func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
-	// Create a new peer connection
+	// For OpenAI, we need a fresh media engine and settings
+	// because OpenAI has different requirements than WhatsApp
+	m := &webrtc.MediaEngine{}
+	
+	// Register Opus codec for OpenAI (they require specific parameters)
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:     webrtc.MimeTypeOpus,
+			ClockRate:    48000,
+			Channels:     2,
+			SDPFmtpLine:  "minptime=10;useinbandfec=1",
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return fmt.Errorf("failed to register Opus codec: %v", err)
+	}
+	
+	// Create a new API specifically for OpenAI connection
+	openAIAPI := webrtc.NewAPI(webrtc.WithMediaEngine(m))
+	
+	// Create a new peer connection with proper configuration
+	// OpenAI acts as a passive ICE agent, so we need to be active
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
@@ -95,19 +119,78 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 		},
 	}
 	
-	pc, err := api.NewPeerConnection(config)
+	pc, err := openAIAPI.NewPeerConnection(config)
 	if err != nil {
 		return fmt.Errorf("failed to create peer connection: %v", err)
 	}
 	c.peerConnection = pc
 	
-	// Create a data channel for Realtime API communication
+	// Log connection state changes
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("🔌 OpenAI connection state: %s", state.String())
+	})
+	
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("🧊 OpenAI ICE state: %s", state.String())
+	})
+	
+	// Create a data channel for Realtime API communication FIRST
+	// This ensures it's included in the offer
 	dataChannel, err := pc.CreateDataChannel("oai-events", &webrtc.DataChannelInit{
 		Ordered: func(b bool) *bool { return &b }(true),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create data channel: %v", err)
 	}
+	
+	// Add audio transceiver to ensure audio section in SDP
+	// This is crucial for OpenAI to accept our offer
+	_, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionSendrecv,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to add audio transceiver: %v", err)
+	}
+	
+	// Create audio track for sending audio to OpenAI
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{
+			MimeType:     webrtc.MimeTypeOpus,
+			ClockRate:    48000,
+			Channels:     2,
+			SDPFmtpLine:  "minptime=10;useinbandfec=1",
+		},
+		"audio",
+		"pion-to-openai",
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create audio track: %v", err)
+	}
+	
+	// Add the audio track to the peer connection
+	rtpSender, err := pc.AddTrack(audioTrack)
+	if err != nil {
+		return fmt.Errorf("failed to add audio track: %v", err)
+	}
+	
+	// Read incoming RTCP packets (required for audio to work properly)
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+				return
+			}
+		}
+	}()
+	
+	// Store the audio track for later use
+	c.audioTrack = audioTrack
+	
+	// Handle incoming audio from OpenAI
+	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("🔊 Received audio track from OpenAI: %s (codec: %s)", track.ID(), track.Codec().MimeType)
+		c.remoteAudioTrack = track
+	})
 	
 	// Set up data channel handlers
 	dataChannel.OnOpen(func() {
@@ -118,23 +201,29 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			"type": "session.update",
 			"session": map[string]interface{}{
 				"modalities":     []string{"text", "audio"},
-				"instructions":   "You are a helpful AI assistant. Please help the caller with their questions.",
+				"instructions":   "You are a helpful AI assistant on a phone call. Please help the caller with their questions. Be conversational and friendly.",
 				"voice":         "alloy",
 				"input_audio_format":  "pcm16",
 				"output_audio_format": "pcm16",
-				"input_audio_transcription": map[string]string{
+				"input_audio_transcription": map[string]interface{}{
 					"model": "whisper-1",
+				},
+				"turn_detection": map[string]interface{}{
+					"type": "server_vad",
+					"threshold": 0.5,
+					"prefix_padding_ms": 300,
+					"silence_duration_ms": 200,
 				},
 			},
 		}
 		
 		configJSON, _ := json.Marshal(config)
-		dataChannel.SendText(string(configJSON))
+		if err := dataChannel.SendText(string(configJSON)); err != nil {
+			log.Printf("❌ Failed to send config: %v", err)
+		}
 	})
 	
 	dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
-		log.Printf("📥 Received from OpenAI: %s", string(msg.Data))
-		
 		// Parse the message
 		var event map[string]interface{}
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
@@ -147,6 +236,11 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 		switch eventType {
 		case "session.created":
 			log.Println("✅ Session created with OpenAI")
+			if session, ok := event["session"].(map[string]interface{}); ok {
+				log.Printf("📋 Session details: %+v", session)
+			}
+		case "session.updated":
+			log.Println("✅ Session updated")
 		case "conversation.item.created":
 			log.Println("📝 Conversation item created")
 		case "response.audio.delta":
@@ -155,13 +249,28 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 		case "response.audio_transcript.delta":
 			// Transcript update
 			c.handleTranscriptDelta(event)
+		case "response.text.delta":
+			// Text response
+			if delta, ok := event["delta"].(string); ok {
+				log.Printf("💬 Response: %s", delta)
+			}
+		case "response.done":
+			log.Println("✅ Response complete")
+		case "error":
+			log.Printf("❌ OpenAI error: %+v", event)
+		default:
+			log.Printf("📥 OpenAI event: %s", eventType)
 		}
 	})
 	
 	c.dataChannel = dataChannel
 	
-	// Create offer
-	offer, err := pc.CreateOffer(nil)
+	// Create offer with proper options to ensure audio is included
+	offer, err := pc.CreateOffer(&webrtc.OfferOptions{
+		OfferAnswerOptions: webrtc.OfferAnswerOptions{
+			VoiceActivityDetection: true,
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create offer: %v", err)
 	}
@@ -171,8 +280,31 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 		return fmt.Errorf("failed to set local description: %v", err)
 	}
 	
+	// Wait for ICE gathering to complete
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
+	
+	select {
+	case <-gatherComplete:
+		log.Println("✅ ICE gathering complete for OpenAI connection")
+	case <-time.After(3 * time.Second):
+		log.Println("⏱️ ICE gathering timeout for OpenAI connection")
+	}
+	
+	// Get the offer with candidates
+	localDesc := pc.LocalDescription()
+	if localDesc == nil {
+		return fmt.Errorf("no local description available")
+	}
+	
+	// Log the SDP to verify it has audio
+	log.Printf("📄 SDP Offer to OpenAI (first 500 chars):\n%.500s", localDesc.SDP)
+	if !strings.Contains(localDesc.SDP, "m=audio") {
+		log.Printf("⚠️ WARNING: SDP does not contain audio media section!")
+		log.Printf("📄 Full SDP:\n%s", localDesc.SDP)
+	}
+	
 	// Send offer to OpenAI
-	answer, err := c.sendOfferToOpenAI(offer.SDP)
+	answer, err := c.sendOfferToOpenAI(localDesc.SDP)
 	if err != nil {
 		return fmt.Errorf("failed to send offer to OpenAI: %v", err)
 	}
@@ -195,6 +327,9 @@ func (c *OpenAIRealtimeClient) sendOfferToOpenAI(offerSDP string) (string, error
 	}
 	
 	url := "https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
+	
+	log.Printf("📤 Sending SDP offer to OpenAI (length: %d bytes)", len(offerSDP))
+	log.Printf("📄 Full SDP Offer:\n%s", offerSDP)
 	
 	req, err := http.NewRequest("POST", url, bytes.NewReader([]byte(offerSDP)))
 	if err != nil {
@@ -220,6 +355,7 @@ func (c *OpenAIRealtimeClient) sendOfferToOpenAI(offerSDP string) (string, error
 		return "", fmt.Errorf("OpenAI API error: %s - %s", resp.Status, string(answerSDP))
 	}
 	
+	log.Printf("📥 Received SDP answer from OpenAI (length: %d bytes)", len(answerSDP))
 	return string(answerSDP), nil
 }
 
@@ -278,6 +414,25 @@ func (c *OpenAIRealtimeClient) handleTranscriptDelta(event map[string]interface{
 	if delta, ok := event["delta"].(string); ok {
 		log.Printf("💬 Transcript: %s", delta)
 	}
+}
+
+// ForwardRTPToOpenAI forwards RTP packets from WhatsApp to OpenAI
+func (c *OpenAIRealtimeClient) ForwardRTPToOpenAI(rtpPacket []byte) error {
+	if c.audioTrack == nil {
+		return fmt.Errorf("audio track not initialized")
+	}
+	
+	// Write RTP packet directly to the track
+	if _, err := c.audioTrack.Write(rtpPacket); err != nil {
+		return fmt.Errorf("failed to write RTP packet: %v", err)
+	}
+	
+	return nil
+}
+
+// GetRemoteAudioTrack returns the audio track from OpenAI
+func (c *OpenAIRealtimeClient) GetRemoteAudioTrack() *webrtc.TrackRemote {
+	return c.remoteAudioTrack
 }
 
 // Close closes the connection to OpenAI
