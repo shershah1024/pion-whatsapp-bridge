@@ -52,7 +52,7 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
 			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1", // Match WhatsApp's fmtp exactly
+			SDPFmtpLine: "minptime=20;useinbandfec=1;maxplaybackrate=16000;sprop-maxcapturerate=16000;maxaveragebitrate=20000", // Match WhatsApp's exact parameters
 			RTCPFeedback: []webrtc.RTCPFeedback{
 				{Type: "transport-cc"},
 			},
@@ -607,7 +607,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	// Add a transceiver to ensure sendrecv in the SDP
 	// Don't add a track yet to avoid codec mismatch
-	_, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+	transceiver, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionSendrecv,
 	})
 	if err != nil {
@@ -621,7 +621,17 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
+	// Log transceiver details
 	log.Printf("✅ Added audio transceiver for bidirectional audio (no track yet)")
+	log.Printf("📊 Transceiver direction: %s", transceiver.Direction())
+	log.Printf("📊 Transceiver current direction: %s", transceiver.CurrentDirection())
+	
+	// Get the codecs to verify what we're offering
+	codecs := pc.GetConfiguration().Codecs
+	log.Printf("📊 Available codecs: %d", len(codecs))
+	for i, codec := range codecs {
+		log.Printf("  Codec %d: %s", i, codec.RTPCodecCapability.MimeType)
+	}
 	
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
@@ -736,13 +746,13 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 			return
 		}
 		
-		// Create audio track matching WhatsApp's codec
+		// Create audio track matching WhatsApp's codec exactly
 		audioTrack, err := webrtc.NewTrackLocalStaticRTP(
 			webrtc.RTPCodecCapability{
 				MimeType:    webrtc.MimeTypeOpus,
 				ClockRate:   48000,
 				Channels:    2,
-				SDPFmtpLine: "minptime=10;useinbandfec=1",
+				SDPFmtpLine: "minptime=20;useinbandfec=1;maxplaybackrate=16000;sprop-maxcapturerate=16000;maxaveragebitrate=20000",
 			},
 			"audio",
 			"bridge-audio",
