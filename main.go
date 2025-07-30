@@ -605,24 +605,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Add a transceiver for bidirectional audio
-	// This ensures our SDP has sendrecv instead of recvonly
-	transceiver, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
-		Direction: webrtc.RTPTransceiverDirectionSendrecv,
-	})
-	if err != nil {
-		log.Printf("❌ Failed to add audio transceiver: %v", err)
-		b.mu.Lock()
-		delete(b.activeCalls, callID)
-		b.mu.Unlock()
-		if pc != nil {
-			pc.Close()
-		}
-		return
-	}
-	
-	// Create a dummy audio track to attach to the transceiver
-	// This should ensure sendrecv in the SDP
+	// Create audio track for sending audio to WhatsApp
 	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeOpus,
@@ -644,9 +627,10 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Add the track via the transceiver's sender
-	if err := transceiver.Sender().ReplaceTrack(audioTrack); err != nil {
-		log.Printf("❌ Failed to set track on transceiver: %v", err)
+	// Add track directly to peer connection
+	rtpSender, err := pc.AddTrack(audioTrack)
+	if err != nil {
+		log.Printf("❌ Failed to add audio track: %v", err)
 		b.mu.Lock()
 		delete(b.activeCalls, callID)
 		b.mu.Unlock()
@@ -656,13 +640,20 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
+	// Read incoming RTCP packets
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+				return
+			}
+		}
+	}()
+	
 	// Store the track for later use
 	call.AudioTrack = audioTrack
 	
-	log.Printf("✅ Added audio transceiver with track for bidirectional audio")
-	
-	// Log transceiver state
-	log.Printf("📊 Transceiver direction: %s", transceiver.Direction().String())
+	log.Printf("✅ Added audio track directly to peer connection for bidirectional audio")
 	
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
@@ -687,6 +678,19 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		delete(b.activeCalls, callID)
 		b.mu.Unlock()
 		return
+	}
+	
+	// Log the final SDP that will be sent
+	log.Printf("📄 Final SDP Answer being sent to WhatsApp:")
+	log.Printf("%s", answer.SDP)
+	
+	// Check if it contains sendrecv
+	if strings.Contains(answer.SDP, "a=sendrecv") {
+		log.Printf("✅ SDP contains sendrecv - bidirectional audio enabled")
+	} else if strings.Contains(answer.SDP, "a=recvonly") {
+		log.Printf("❌ WARNING: SDP contains recvonly - only receive audio!")
+	} else if strings.Contains(answer.SDP, "a=sendonly") {
+		log.Printf("⚠️ WARNING: SDP contains sendonly - only send audio!")
 	}
 	
 	// Wait for ICE gathering to complete
@@ -725,27 +729,9 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Wait for ICE connection to be established after pre-accept
-	log.Printf("⏳ Waiting for ICE connection after pre-accept...")
-	
-	// Create a timeout timer
-	iceTimer := time.NewTimer(5 * time.Second)
-	defer iceTimer.Stop()
-	
-	// Wait up to 5 seconds for ICE connection
-	select {
-	case <-iceConnected:
-		log.Printf("✅ ICE connection established - proceeding with accept")
-		iceTimer.Stop()
-	case <-iceTimer.C:
-		log.Printf("⏱️ ICE connection timeout after 5 seconds - proceeding anyway")
-	}
-	
-	// Small delay to ensure connection is stable
-	time.Sleep(100 * time.Millisecond)
-	
-	// Now send accept to start media flow
-	log.Printf("📞 Sending accept for call %s", callID)
+	// According to WhatsApp diagram, we should send accept immediately
+	// The connection becomes active on first packet OR accept
+	log.Printf("📞 Sending accept immediately after pre-accept for call %s", callID)
 	if err := b.sendAcceptCall(callID, answer.SDP); err != nil {
 		log.Printf("❌ Failed to accept call: %v", err)
 		b.mu.Lock()
@@ -763,6 +749,29 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	connectionState := pc.ConnectionState()
 	iceState := pc.ICEConnectionState()
 	log.Printf("📊 Connection states - PC: %s, ICE: %s", connectionState.String(), iceState.String())
+	
+	// Start sending silence to activate the media flow
+	// According to WhatsApp diagram, connection becomes active on first packet
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		b.mu.Lock()
+		track := call.AudioTrack
+		b.mu.Unlock()
+		
+		if track != nil {
+			log.Printf("🔇 Sending silence packets to activate media flow")
+			// Send a few silence packets to activate the connection
+			silencePacket := make([]byte, 160) // 10ms of silence at 16kHz
+			for i := 0; i < 10; i++ {
+				if _, err := track.Write(silencePacket); err != nil {
+					log.Printf("❌ Error sending silence: %v", err)
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			log.Printf("✅ Sent initial silence packets")
+		}
+	}()
 	
 	// Now that the call is accepted, start media flow
 	// Connect to OpenAI Realtime API if configured
