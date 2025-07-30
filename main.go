@@ -556,7 +556,20 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	hasAudio := strings.Contains(sdpOffer, "m=audio")
 	hasIceLite := strings.Contains(sdpOffer, "a=ice-lite")
 	hasOpus := strings.Contains(sdpOffer, "opus/48000")
-	log.Printf("✓ SDP contains: audio=%v, ice-lite=%v, opus=%v", hasAudio, hasIceLite, hasOpus)
+	hasTelephoneEvent := strings.Contains(sdpOffer, "telephone-event")
+	log.Printf("✓ SDP contains: audio=%v, ice-lite=%v, opus=%v, telephone-event=%v", hasAudio, hasIceLite, hasOpus, hasTelephoneEvent)
+	
+	// Extract codecs offered by WhatsApp
+	if hasAudio {
+		lines := strings.Split(sdpOffer, "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "m=audio") {
+				log.Printf("📊 WhatsApp audio line: %s", strings.TrimSpace(line))
+			} else if strings.HasPrefix(line, "a=rtpmap:") {
+				log.Printf("📊 WhatsApp codec: %s", strings.TrimSpace(line))
+			}
+		}
+	}
 	
 	// Try to parse specific problem areas
 	if strings.Contains(sdpOffer, "a=extmap:") {
@@ -627,12 +640,10 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 
-	// Add transceiver with the track
-	transceiver, err := pc.AddTransceiverFromTrack(audioTrack, webrtc.RTPTransceiverInit{
-		Direction: webrtc.RTPTransceiverDirectionSendrecv,
-	})
+	// Add the track directly to ensure Opus is in the SDP
+	rtpSender, err := pc.AddTrack(audioTrack)
 	if err != nil {
-		log.Printf("❌ Failed to add audio transceiver: %v", err)
+		log.Printf("❌ Failed to add audio track: %v", err)
 		b.mu.Lock()
 		delete(b.activeCalls, callID)
 		b.mu.Unlock()
@@ -642,12 +653,21 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
+	// Read incoming RTCP packets
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+				return
+			}
+		}
+	}()
+	
 	// Store the track in the call
 	call.AudioTrack = audioTrack
 	
-	// Log transceiver details
-	log.Printf("✅ Added audio transceiver with track for bidirectional audio")
-	log.Printf("📊 Transceiver direction: %s", transceiver.Direction())
+	// Log track details
+	log.Printf("✅ Added audio track with Opus codec for bidirectional audio")
 	
 	// Create answer
 	answer, err := pc.CreateAnswer(nil)
