@@ -772,8 +772,25 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		
 		log.Printf("🔊 Starting IMMEDIATE continuous audio to WhatsApp")
 		
-		// Minimal Opus frame for silence
-		opusFrame := []byte{0xFC, 0x00, 0x00}
+		// The track expects samples, not RTP packets!
+		// For Opus at 48kHz stereo, 20ms = 960 samples per channel
+		// Since it's interleaved stereo, that's 960 * 2 * 2 bytes (16-bit) = 3840 bytes
+		// But TrackLocalStaticRTP.Write expects Opus-encoded data, not raw PCM
+		
+		// Create a proper Opus silence frame
+		// Opus can encode silence very efficiently
+		// TOC byte (0x04) = SILK-only, mono, 20ms
+		// Followed by a minimal SILK frame indicating silence
+		opusSilence := []byte{
+			0x04,       // TOC: SILK-only, mono, 20ms
+			0x00,       // SILK frame: minimal size indicating silence
+		}
+		
+		// For stereo, use different TOC
+		opusStereoSilence := []byte{
+			0xFC,       // TOC: CELT-only, stereo, 20ms  
+			0xFF, 0xFE, // Minimal CELT stereo silence frame
+		}
 		
 		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()
@@ -782,8 +799,11 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		startTime := time.Now()
 		
 		for range ticker.C {
-			if _, err := audioTrack.Write(opusFrame); err != nil {
+			// TrackLocalStaticRTP handles RTP packetization internally
+			// We just need to provide Opus frames
+			if _, err := audioTrack.Write(opusStereoSilence); err != nil {
 				log.Printf("❌ Error sending audio after %d packets: %v", packetCount, err)
+				log.Printf("📊 Error details: %T", err)
 				return
 			}
 			
@@ -972,16 +992,18 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 		// TrackLocalStaticRTP.Write expects Opus-encoded data, not raw PCM
 		// For now, let's send minimal valid Opus frames
 		
-		// Minimal Opus frame for silence (TOC byte + minimal payload)
-		// TOC byte: 0xFC = stereo, 20ms, CELT mode
-		opusFrame := []byte{0xFC, 0x00, 0x00}
+		// Use the same Opus frame format as the immediate audio
+		opusStereoSilence := []byte{
+			0xFC,       // TOC: CELT-only, stereo, 20ms  
+			0xFF, 0xFE, // Minimal CELT stereo silence frame
+		}
 		
 		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()
 		
 		packetCount := 0
 		for range ticker.C {
-			if _, err := testAudioTrack.Write(opusFrame); err != nil {
+			if _, err := testAudioTrack.Write(opusStereoSilence); err != nil {
 				log.Printf("❌ Error writing test audio after %d packets: %v", packetCount, err)
 				return
 			}
