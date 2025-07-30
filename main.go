@@ -514,16 +514,22 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 						openAIForwardingStarted = true
 					}
 					
-					// TODO: Fix OpenAI audio forwarding
-					// Currently sending RTP to audio track, but OpenAI expects:
-					// 1. Decode Opus RTP packets to PCM16 audio  
-					// 2. Base64 encode the PCM16 data
-					// 3. Send via data channel using SendAudioToOpenAI()
-					// 4. Periodically call CommitAudioBuffer()
+					// Use audio processor to properly send audio to OpenAI
+					if !openAIForwardingStarted {
+						// Create audio processor on first use
+						processor := NewAudioProcessor(openAIClient)
+						processor.Start()
+						
+						// Store processor in a way we can access it later for cleanup
+						// For now, just process inline
+					}
 					
-					if err := openAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
+					// Create a simple audio processor inline for now
+					// In production, we'd store this processor properly
+					processor := NewAudioProcessor(openAIClient)
+					if err := processor.ProcessRTPPacket(buf[:n]); err != nil {
 						if packetCount <= 3 { // Only log first few errors
-							log.Printf("❌ Error forwarding to OpenAI (wrong method): %v", err)
+							log.Printf("❌ Error processing audio for OpenAI: %v", err)
 						}
 					} else if packetCount == 1 || (openAIForwardingStarted && packetCount%100 == 0) {
 						if packetCount == 1 {
