@@ -52,7 +52,7 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
 			Channels:    2,
-			SDPFmtpLine: "minptime=20;useinbandfec=1;maxplaybackrate=16000;sprop-maxcapturerate=16000;maxaveragebitrate=20000", // Match WhatsApp's exact parameters
+			SDPFmtpLine: "minptime=10;useinbandfec=1", // Basic Opus parameters
 			RTCPFeedback: []webrtc.RTCPFeedback{
 				{Type: "transport-cc"},
 			},
@@ -605,9 +605,30 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
-	// Add a transceiver to ensure sendrecv in the SDP
-	// Don't add a track yet to avoid codec mismatch
-	transceiver, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+	// Create audio track first
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		"audio",
+		"bridge-audio",
+	)
+	if err != nil {
+		log.Printf("❌ Failed to create audio track: %v", err)
+		b.mu.Lock()
+		delete(b.activeCalls, callID)
+		b.mu.Unlock()
+		if pc != nil {
+			pc.Close()
+		}
+		return
+	}
+
+	// Add transceiver with the track
+	transceiver, err := pc.AddTransceiverFromTrack(audioTrack, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionSendrecv,
 	})
 	if err != nil {
@@ -621,8 +642,11 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		return
 	}
 	
+	// Store the track in the call
+	call.AudioTrack = audioTrack
+	
 	// Log transceiver details
-	log.Printf("✅ Added audio transceiver for bidirectional audio (no track yet)")
+	log.Printf("✅ Added audio transceiver with track for bidirectional audio")
 	log.Printf("📊 Transceiver direction: %s", transceiver.Direction())
 	
 	// Create answer
@@ -720,56 +744,10 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	iceState := pc.ICEConnectionState()
 	log.Printf("📊 Connection states - PC: %s, ICE: %s", connectionState.String(), iceState.String())
 	
-	// Add audio track after connection is established
+	// Send silence packets to activate the connection
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		
-		// Find the audio transceiver
-		var audioTransceiver *webrtc.RTPTransceiver
-		for _, t := range pc.GetTransceivers() {
-			if t.Kind() == webrtc.RTPCodecTypeAudio {
-				audioTransceiver = t
-				break
-			}
-		}
-		
-		if audioTransceiver == nil {
-			log.Printf("❌ No audio transceiver found")
-			return
-		}
-		
-		// Create audio track matching WhatsApp's codec exactly
-		audioTrack, err := webrtc.NewTrackLocalStaticRTP(
-			webrtc.RTPCodecCapability{
-				MimeType:    webrtc.MimeTypeOpus,
-				ClockRate:   48000,
-				Channels:    2,
-				SDPFmtpLine: "minptime=20;useinbandfec=1;maxplaybackrate=16000;sprop-maxcapturerate=16000;maxaveragebitrate=20000",
-			},
-			"audio",
-			"bridge-audio",
-		)
-		if err != nil {
-			log.Printf("❌ Failed to create audio track: %v", err)
-			return
-		}
-		
-		// Replace the transceiver's track
-		if err := audioTransceiver.Sender().ReplaceTrack(audioTrack); err != nil {
-			log.Printf("❌ Failed to replace track: %v", err)
-			return
-		}
-		
-		// Store the track
-		b.mu.Lock()
-		if c, exists := b.activeCalls[callID]; exists {
-			c.AudioTrack = audioTrack
-		}
-		b.mu.Unlock()
-		
-		log.Printf("✅ Added audio track to transceiver")
-		
-		// Send silence to activate the connection
 		log.Printf("🔇 Sending silence packets to activate media flow")
 		silencePacket := make([]byte, 160) // 10ms of silence
 		for i := 0; i < 10; i++ {
