@@ -805,17 +805,29 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	
 	// Now that the call is accepted, start media flow
 	// Connect to OpenAI Realtime API if configured
+	// Check for Azure first, then fallback to OpenAI
+	azureKey := os.Getenv("AZURE_OPENAI_API_KEY")
 	openAIKey := os.Getenv("OPENAI_API_KEY")
-	if openAIKey != "" {
-		log.Printf("🤖 OpenAI API key found, starting AI integration...")
-		// Start OpenAI integration only after accept succeeds
+
+	apiKey := azureKey
+	if apiKey == "" {
+		apiKey = openAIKey
+	}
+
+	if apiKey != "" {
+		if azureKey != "" {
+			log.Printf("🔵 Azure OpenAI API key found, starting Azure AI integration...")
+		} else {
+			log.Printf("🤖 OpenAI API key found, starting AI integration...")
+		}
+		// Start OpenAI/Azure integration only after accept succeeds
 		go func() {
 			// Small delay to ensure everything is ready
 			time.Sleep(500 * time.Millisecond)
-			b.connectToOpenAIRealtime(callID, pc, openAIKey)
+			b.connectToOpenAIRealtime(callID, pc, apiKey)
 		}()
 	} else {
-		log.Printf("ℹ️ No OpenAI API key found, will play welcome message")
+		log.Printf("ℹ️ No OpenAI/Azure API key found, will play welcome message")
 		// Play a welcome message only after accept succeeds
 		go func() {
 			// Small delay to ensure media channel is ready

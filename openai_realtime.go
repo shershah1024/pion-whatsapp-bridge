@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 // OpenAIRealtimeClient handles the connection to OpenAI's Realtime API
 type OpenAIRealtimeClient struct {
 	apiKey           string
+	azureEndpoint    string
+	azureDeployment  string
 	peerConnection   *webrtc.PeerConnection
 	dataChannel      *webrtc.DataChannel
 	ephemeralToken   string
@@ -25,8 +28,18 @@ type OpenAIRealtimeClient struct {
 
 // NewOpenAIRealtimeClient creates a new OpenAI Realtime client
 func NewOpenAIRealtimeClient(apiKey string) *OpenAIRealtimeClient {
+	// Check if using Azure OpenAI
+	azureEndpoint := os.Getenv("AZURE_OPENAI_ENDPOINT")
+	azureDeployment := os.Getenv("AZURE_OPENAI_DEPLOYMENT")
+
+	if azureEndpoint != "" {
+		log.Printf("🔵 Using Azure OpenAI: %s", azureEndpoint)
+	}
+
 	return &OpenAIRealtimeClient{
-		apiKey: apiKey,
+		apiKey:          apiKey,
+		azureEndpoint:   azureEndpoint,
+		azureDeployment: azureDeployment,
 	}
 }
 
@@ -38,7 +51,72 @@ type EphemeralTokenResponse struct {
 
 // GetEphemeralToken fetches a temporary token for the Realtime API (GA interface)
 func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
-	url := "https://api.openai.com/v1/realtime/client_secrets"
+	var url string
+
+	// Use Azure endpoint if configured, otherwise use OpenAI
+	if c.azureEndpoint != "" {
+		// Azure requires ephemeral token from sessions endpoint
+		log.Printf("🔵 Getting Azure OpenAI ephemeral token from sessions endpoint")
+		sessionsURL := fmt.Sprintf("%s/openai/realtimeapi/sessions?api-version=2025-04-01-preview",
+			c.azureEndpoint)
+		log.Printf("📤 Sessions URL: %s", sessionsURL)
+		log.Printf("🔑 API Key (first 20 chars): %.20s...", c.apiKey)
+
+		reqBody := map[string]interface{}{
+			"model": c.azureDeployment,
+			"voice": "alloy",
+		}
+
+		jsonData, err := json.Marshal(reqBody)
+		if err != nil {
+			return err
+		}
+
+		req, err := http.NewRequest("POST", sessionsURL, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return err
+		}
+
+		req.Header.Set("api-key", c.apiKey) // Azure uses 'api-key' header
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			log.Printf("❌ Azure sessions API error. Status: %s, Body: %s", resp.Status, string(body))
+			return fmt.Errorf("Azure sessions API error: %s - %s", resp.Status, string(body))
+		}
+
+		log.Printf("📥 Azure session response: %s", string(body))
+
+		var sessionResp struct {
+			ID           string `json:"id"`
+			ClientSecret struct {
+				Value string `json:"value"`
+			} `json:"client_secret"`
+		}
+
+		if err := json.Unmarshal(body, &sessionResp); err != nil {
+			log.Printf("❌ Failed to parse Azure session response: %v", err)
+			return err
+		}
+
+		c.ephemeralToken = sessionResp.ClientSecret.Value
+		log.Printf("✅ Got Azure ephemeral token for session: %s", sessionResp.ID)
+		return nil
+	}
+
+	url = "https://api.openai.com/v1/realtime/client_secrets"
 
 	reqBody := map[string]interface{}{
 		"session": map[string]interface{}{
@@ -407,9 +485,19 @@ func (c *OpenAIRealtimeClient) sendOfferToOpenAI(offerSDP string) (string, error
 		return "", fmt.Errorf("no ephemeral token available")
 	}
 
-	url := "https://api.openai.com/v1/realtime/calls"
+	var url string
 
-	log.Printf("📤 Sending SDP offer to OpenAI (length: %d bytes)", len(offerSDP))
+	// Use Azure endpoint if configured
+	if c.azureEndpoint != "" && c.azureDeployment != "" {
+		// Azure WebRTC endpoint uses region-specific subdomain
+		url = fmt.Sprintf("https://eastus2.realtimeapi-preview.ai.azure.com/v1/realtimertc?model=%s",
+			c.azureDeployment)
+		log.Printf("🔵 Using Azure OpenAI WebRTC endpoint: %s", url)
+	} else {
+		url = "https://api.openai.com/v1/realtime/calls"
+	}
+
+	log.Printf("📤 Sending SDP offer (length: %d bytes)", len(offerSDP))
 	log.Printf("📄 Full SDP Offer:\n%s", offerSDP)
 
 	req, err := http.NewRequest("POST", url, bytes.NewReader([]byte(offerSDP)))
@@ -417,6 +505,7 @@ func (c *OpenAIRealtimeClient) sendOfferToOpenAI(offerSDP string) (string, error
 		return "", err
 	}
 
+	// Both Azure and OpenAI use Bearer token for WebRTC endpoint
 	req.Header.Set("Authorization", "Bearer "+c.ephemeralToken)
 	req.Header.Set("Content-Type", "application/sdp")
 
