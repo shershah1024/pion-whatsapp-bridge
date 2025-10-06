@@ -1,0 +1,9 @@
+tunnel: fbc9f22a-6dac-4be1-8f61-48c9dac102f3
+credentials-file: /Users/imaginedemo/.cloudflared/fbc9f22a-6dac-4be1-8f61-48c9dac102f3.json
+
+ingress:
+  # Route all HTTP traffic to your Go application
+  - hostname: whatsapp-bridge.tslfiles.org
+    service: http://localhost:3011
+  # Catch-all rule (required)
+  - service: http_status:404

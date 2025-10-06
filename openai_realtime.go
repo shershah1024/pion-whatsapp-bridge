@@ -30,60 +30,74 @@ func NewOpenAIRealtimeClient(apiKey string) *OpenAIRealtimeClient {
 	}
 }
 
-// EphemeralTokenResponse represents the response from the ephemeral token endpoint
+// EphemeralTokenResponse represents the response from the ephemeral token endpoint (GA)
 type EphemeralTokenResponse struct {
-	ClientSecret struct {
-		Value     string `json:"value"`
-		ExpiresAt int64  `json:"expires_at"`
-	} `json:"client_secret"`
+	Value     string `json:"value"`
+	ExpiresAt int64  `json:"expires_at"`
 }
 
-// GetEphemeralToken fetches a temporary token for the Realtime API
+// GetEphemeralToken fetches a temporary token for the Realtime API (GA interface)
 func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
-	url := "https://api.openai.com/v1/realtime/sessions"
-	
+	url := "https://api.openai.com/v1/realtime/client_secrets"
+
 	reqBody := map[string]interface{}{
-		"model": "gpt-4o-realtime-preview-2024-12-17",
-		"voice": "alloy",
+		"session": map[string]interface{}{
+			"type": "realtime",
+			"model": "gpt-realtime",
+			"audio": map[string]interface{}{
+				"output": map[string]interface{}{
+					"voice": "alloy",
+				},
+			},
+		},
 	}
-	
+
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return err
 	}
-	
+
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return err
 	}
-	
+
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
-	
+
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("❌ Failed to get ephemeral token. Status: %s, Body: %s", resp.Status, string(body))
 		return fmt.Errorf("failed to get ephemeral token: %s - %s", resp.Status, string(body))
 	}
-	
+
+	log.Printf("📥 Token response body: %s", string(body))
+
 	var tokenResp EphemeralTokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		log.Printf("❌ Failed to parse token response: %v, Body: %s", err, string(body))
 		return err
 	}
-	
-	c.ephemeralToken = tokenResp.ClientSecret.Value
-	log.Printf("✅ Got ephemeral token, expires at: %d", tokenResp.ClientSecret.ExpiresAt)
-	
+
+	if tokenResp.Value == "" {
+		log.Printf("❌ Empty token value in response")
+		return fmt.Errorf("empty token value received")
+	}
+
+	c.ephemeralToken = tokenResp.Value
+	log.Printf("✅ Got ephemeral token (first 20 chars): %.20s..., expires at: %d", tokenResp.Value, tokenResp.ExpiresAt)
+
 	return nil
 }
 
@@ -199,26 +213,25 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 	dataChannel.OnOpen(func() {
 		log.Println("✅ OpenAI Realtime data channel opened")
 		
-		// Send initial configuration
+		// Send initial configuration (GA interface)
 		config := map[string]interface{}{
 			"type": "session.update",
 			"session": map[string]interface{}{
-				"modalities":     []string{"text", "audio"},
-				"instructions":   "You are a friendly German conversation partner for A1 level learners. Speak 70% English and 30% simple German. Use basic vocabulary only: greetings, numbers 1-20, colors, family members, days of the week, weather terms, and simple daily activities. Always translate German phrases immediately after saying them. Speak slowly and clearly. Be very encouraging and patient. Ask simple questions like 'Wie heißt du?' (What's your name?) or 'Wie ist das Wetter?' (How's the weather?). You can check real weather to practice weather vocabulary in German.",
-				"voice":         "alloy",
-				"input_audio_format":  "pcm16",
-				"output_audio_format": "pcm16",
-				"input_audio_transcription": map[string]interface{}{
-					"model": "whisper-1",
+				"type": "realtime",
+				"instructions": "You are a friendly German conversation partner for A1 level learners. Speak 70% English and 30% simple German. Use basic vocabulary only: greetings, numbers 1-20, colors, family members, days of the week, weather terms, and simple daily activities. Always translate German phrases immediately after saying them. Speak slowly and clearly. Be very encouraging and patient. Ask simple questions like 'Wie heißt du?' (What's your name?) or 'Wie ist das Wetter?' (How's the weather?). You can check real weather to practice weather vocabulary in German.",
+				"audio": map[string]interface{}{
+					"input": map[string]interface{}{
+						"turn_detection": map[string]interface{}{
+							"type": "server_vad",
+							"threshold": 0.5,
+							"prefix_padding_ms": 300,
+							"silence_duration_ms": 200,
+						},
+					},
+					"output": map[string]interface{}{
+						"voice": "alloy",
+					},
 				},
-				"turn_detection": map[string]interface{}{
-					"type": "server_vad",
-					"threshold": 0.5,
-					"prefix_padding_ms": 300,
-					"silence_duration_ms": 200,
-				},
-				"temperature": 0.8,
-				"max_response_output_tokens": 150,
 				"tools": []map[string]interface{}{
 					{
 						"type": "function",
@@ -241,8 +254,11 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 		}
 		
 		configJSON, _ := json.Marshal(config)
+		log.Printf("📤 Sending session update config: %s", string(configJSON))
 		if err := dataChannel.SendText(string(configJSON)); err != nil {
 			log.Printf("❌ Failed to send config: %v", err)
+		} else {
+			log.Printf("✅ Session update config sent successfully")
 		}
 	})
 	
@@ -250,11 +266,11 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 		// Parse the message
 		var event map[string]interface{}
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
-			log.Printf("Failed to parse message: %v", err)
+			log.Printf("❌ Failed to parse message: %v, Data: %s", err, string(msg.Data))
 			return
 		}
-		
-		// Handle different event types
+
+		// Handle different event types (GA interface)
 		eventType, _ := event["type"].(string)
 		switch eventType {
 		case "session.created":
@@ -262,41 +278,67 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			if session, ok := event["session"].(map[string]interface{}); ok {
 				log.Printf("📋 Session details: %+v", session)
 			}
-			// Trigger a welcome message
-			go func() {
-				time.Sleep(500 * time.Millisecond)
-				if err := c.TriggerResponse("Hallo! Hello! I'm your German conversation partner. Let's chat in simple German and English. Wie geht's? That means 'How are you?' You can answer 'Gut' for good, or 'Sehr gut' for very good. How are you today?"); err != nil {
-					log.Printf("❌ Failed to send welcome message: %v", err)
-				}
-			}()
+			// Don't send manual welcome - let VAD trigger naturally when user speaks
+			log.Println("🎤 Waiting for user to speak...")
 		case "session.updated":
 			log.Println("✅ Session updated")
 		case "conversation.item.created":
 			log.Println("📝 Conversation item created")
-		case "response.audio.delta":
-			// Audio data from OpenAI
+		case "conversation.item.added":
+			log.Println("📝 Conversation item added")
+		case "conversation.item.done":
+			log.Println("✅ Conversation item done")
+		case "response.output_audio.delta":
+			// Audio data from OpenAI (GA interface - new event name)
+			if delta, ok := event["delta"].(string); ok {
+				log.Printf("🔊 Received audio delta from OpenAI: %d bytes (base64)", len(delta))
+			}
 			c.handleAudioDelta(event)
-		case "response.audio_transcript.delta":
-			// Transcript update
+		case "response.output_audio_transcript.delta":
+			// Transcript update (GA interface - new event name)
 			c.handleTranscriptDelta(event)
-		case "response.text.delta":
-			// Text response
+		case "response.output_text.delta":
+			// Text response (GA interface - new event name)
 			if delta, ok := event["delta"].(string); ok {
 				log.Printf("💬 Response: %s", delta)
 			}
 		case "response.done":
 			log.Println("✅ Response complete")
+			// Log response details to debug why no audio
+			if response, ok := event["response"].(map[string]interface{}); ok {
+				log.Printf("📋 Response details: %+v", response)
+			}
 		case "input_audio_buffer.speech_started":
 			log.Println("🎤 Speech detected by OpenAI")
 		case "input_audio_buffer.speech_stopped":
 			log.Println("🔇 Speech ended")
 		case "input_audio_buffer.committed":
 			log.Println("📤 Audio buffer committed to OpenAI")
+		case "conversation.item.input_audio_transcription.completed":
+			// Transcription succeeded (GA interface)
+			if transcript, ok := event["transcript"].(string); ok {
+				log.Printf("📝 Transcription: %s", transcript)
+			}
+		case "conversation.item.input_audio_transcription.failed":
+			// Transcription failed - log detailed error
+			log.Printf("❌ Transcription failed! Event details: %+v", event)
+			if errorData, ok := event["error"].(map[string]interface{}); ok {
+				log.Printf("❌ Error details: %+v", errorData)
+				if code, ok := errorData["code"].(string); ok {
+					log.Printf("❌ Error code: %s", code)
+				}
+				if message, ok := errorData["message"].(string); ok {
+					log.Printf("❌ Error message: %s", message)
+				}
+			}
 		case "response.function_call_arguments.done":
 			// Function call completed
 			c.handleFunctionCall(event)
 		case "error":
-			log.Printf("❌ OpenAI error: %+v", event)
+			log.Printf("❌ OpenAI error event: %+v", event)
+			if errorData, ok := event["error"].(map[string]interface{}); ok {
+				log.Printf("❌ Error details: %+v", errorData)
+			}
 		default:
 			log.Printf("📥 OpenAI event: %s", eventType)
 		}
@@ -359,41 +401,42 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 	return nil
 }
 
-// sendOfferToOpenAI sends the WebRTC offer to OpenAI and gets the answer
+// sendOfferToOpenAI sends the WebRTC offer to OpenAI and gets the answer (GA interface)
 func (c *OpenAIRealtimeClient) sendOfferToOpenAI(offerSDP string) (string, error) {
 	if c.ephemeralToken == "" {
 		return "", fmt.Errorf("no ephemeral token available")
 	}
-	
-	url := "https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
-	
+
+	url := "https://api.openai.com/v1/realtime/calls"
+
 	log.Printf("📤 Sending SDP offer to OpenAI (length: %d bytes)", len(offerSDP))
 	log.Printf("📄 Full SDP Offer:\n%s", offerSDP)
-	
+
 	req, err := http.NewRequest("POST", url, bytes.NewReader([]byte(offerSDP)))
 	if err != nil {
 		return "", err
 	}
-	
+
 	req.Header.Set("Authorization", "Bearer "+c.ephemeralToken)
 	req.Header.Set("Content-Type", "application/sdp")
-	
+
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	
+
 	answerSDP, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
-	
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		log.Printf("❌ OpenAI SDP exchange failed. Status: %s, Response: %s", resp.Status, string(answerSDP))
 		return "", fmt.Errorf("OpenAI API error: %s - %s", resp.Status, string(answerSDP))
 	}
-	
+
 	log.Printf("📥 Received SDP answer from OpenAI (status: %d, length: %d bytes)", resp.StatusCode, len(answerSDP))
 	return string(answerSDP), nil
 }
@@ -480,20 +523,19 @@ func (c *OpenAIRealtimeClient) TriggerResponse(text string) error {
 	if c.dataChannel == nil || c.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
 		return fmt.Errorf("data channel not open")
 	}
-	
+
 	event := map[string]interface{}{
 		"type": "response.create",
 		"response": map[string]interface{}{
-			"modalities": []string{"text", "audio"},
 			"instructions": text,
 		},
 	}
-	
+
 	eventJSON, err := json.Marshal(event)
 	if err != nil {
 		return err
 	}
-	
+
 	log.Printf("📤 Triggering OpenAI response: %s", text)
 	return c.dataChannel.SendText(string(eventJSON))
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -161,7 +162,7 @@ func (b *WhatsAppBridge) Start() {
 	// Get port from environment or default
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "3000"
+		port = "3011"
 	}
 	
 	// Start server
@@ -799,55 +800,8 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	iceState := pc.ICEConnectionState()
 	log.Printf("📊 Connection states - PC: %s, ICE: %s", connectionState.String(), iceState.String())
 	
-	// Start sending continuous audio immediately to keep connection alive
-	go func() {
-		time.Sleep(100 * time.Millisecond) // Very short delay
-		
-		log.Printf("🔊 Starting IMMEDIATE continuous audio to WhatsApp")
-		
-		// The track expects samples, not RTP packets!
-		// For Opus at 48kHz stereo, 20ms = 960 samples per channel
-		// Since it's interleaved stereo, that's 960 * 2 * 2 bytes (16-bit) = 3840 bytes
-		// But TrackLocalStaticRTP.Write expects Opus-encoded data, not raw PCM
-		
-		// Create a proper Opus stereo silence frame (20ms at 48kHz)
-		// Use a more complete Opus frame to avoid RTP header issues
-		opusStereoSilence := []byte{
-			0xFC,                   // TOC: stereo, 20ms, CELT mode
-			0x02,                   // Frame length code (indicates 2 more bytes follow)
-			0x00, 0x00,            // Stereo silence payload
-		}
-		
-		ticker := time.NewTicker(20 * time.Millisecond)
-		defer ticker.Stop()
-		
-		packetCount := 0
-		startTime := time.Now()
-		
-		for range ticker.C {
-			// TrackLocalStaticRTP handles RTP packetization internally
-			// We just need to provide Opus frames
-			if _, err := audioTrack.Write(opusStereoSilence); err != nil {
-				log.Printf("❌ Error sending audio after %d packets: %v", packetCount, err)
-				log.Printf("📊 Error details: %T", err)
-				return
-			}
-			
-			packetCount++
-			if packetCount == 1 {
-				log.Printf("✅ First audio packet sent to WhatsApp")
-			} else if packetCount == 50 {
-				log.Printf("📊 1 second of audio sent")
-			} else if packetCount == 250 {
-				log.Printf("📊 5 seconds of audio sent")
-			} else if packetCount == 500 {
-				log.Printf("📊 10 seconds of audio sent - call should stay alive")
-			} else if packetCount == 1000 {
-				elapsed := time.Since(startTime)
-				log.Printf("📊 20 seconds of audio sent (elapsed: %v) - call should definitely stay alive", elapsed)
-			}
-		}
-	}()
+	// OpenAI will send audio, so we don't need continuous silence anymore
+	log.Printf("🎧 Waiting for OpenAI to send audio...")
 	
 	// Now that the call is accepted, start media flow
 	// Connect to OpenAI Realtime API if configured
@@ -1032,23 +986,41 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 		}
 		
 		// Forward RTP packets from OpenAI to WhatsApp
-		rtpBuf := make([]byte, 1400)
 		packetCount := 0
 		lastLogTime := time.Now()
-		
+
 		for {
-			n, _, readErr := openAITrack.Read(rtpBuf)
+			// Read the full RTP packet (not just payload)
+			rtpPacket, _, readErr := openAITrack.ReadRTP()
 			if readErr != nil {
-				log.Printf("❌ Error reading OpenAI audio: %v", readErr)
+				log.Printf("❌ Error reading OpenAI RTP: %v", readErr)
 				return
 			}
-			
-			// Forward to WhatsApp
-			if _, writeErr := whatsappTrack.Write(rtpBuf[:n]); writeErr != nil {
-				log.Printf("❌ Error forwarding to WhatsApp: %v", writeErr)
+
+			// Log first few packets for debugging
+			if packetCount < 3 {
+				log.Printf("🔍 OpenAI RTP packet %d: PayloadType=%d, SequenceNumber=%d, Timestamp=%d, PayloadSize=%d",
+					packetCount, rtpPacket.PayloadType, rtpPacket.SequenceNumber, rtpPacket.Timestamp, len(rtpPacket.Payload))
+			}
+
+			// Marshal the RTP packet to bytes
+			rtpBytes, marshalErr := rtpPacket.Marshal()
+			if marshalErr != nil {
+				log.Printf("❌ Error marshaling RTP packet: %v", marshalErr)
+				continue
+			}
+
+			// Write the complete RTP packet to WhatsApp
+			bytesWritten, writeErr := whatsappTrack.Write(rtpBytes)
+			if writeErr != nil {
+				log.Printf("❌ Error forwarding to WhatsApp (packet %d): %v", packetCount, writeErr)
 				return
 			}
-			
+
+			if packetCount < 3 {
+				log.Printf("✅ Wrote %d bytes to WhatsApp track", bytesWritten)
+			}
+
 			packetCount++
 			if packetCount == 1 {
 				log.Printf("✅ First OpenAI audio packet forwarded to WhatsApp!")
@@ -1272,10 +1244,17 @@ func max(a, b int) int {
 }
 
 func main() {
+	// Load .env file
+	if err := godotenv.Load(); err != nil {
+		log.Println("⚠️  No .env file found or error loading it")
+	} else {
+		log.Println("✅ Loaded .env file")
+	}
+
 	log.Println("🚀 Starting Pion WhatsApp Bridge v3 - Proper Audio Architecture")
 	log.Println("✨ Pure Go implementation with native ice-lite support")
 	log.Println("🎯 Direct RTP forwarding: WhatsApp ↔️ OpenAI")
-	
+
 	bridge := NewWhatsAppBridge()
 	bridge.Start()
 }
