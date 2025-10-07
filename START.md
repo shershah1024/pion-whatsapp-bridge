@@ -30,6 +30,23 @@ go run audio_processor.go main.go openai_realtime.go
 - **Public URL**: https://whatsapp-bridge.tslfiles.org
 - **Webhook**: https://whatsapp-bridge.tslfiles.org/whatsapp-call
 - **Health Check**: https://whatsapp-bridge.tslfiles.org/health
+- **Initiate Outbound Call**: POST to http://localhost:3011/initiate-call
+
+## 3. Initiate Outbound Call (Optional)
+
+To call a WhatsApp user (requires permission):
+
+```bash
+./test_outbound_call.sh
+```
+
+Or manually:
+
+```bash
+curl -X POST http://localhost:3011/initiate-call \
+  -H "Content-Type: application/json" \
+  -d '{"to": "919885842349"}'
+```
 
 ## Troubleshooting
 

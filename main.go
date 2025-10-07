@@ -158,6 +158,9 @@ func (b *WhatsAppBridge) Start() {
 	router.HandleFunc("/test-call", b.handleTestCall).Methods("POST")
 	router.HandleFunc("/status", b.handleStatus).Methods("GET")
 	router.HandleFunc("/health", b.handleHealth).Methods("GET")
+
+	// Outbound call endpoint
+	router.HandleFunc("/initiate-call", b.handleInitiateCall).Methods("POST")
 	
 	// Get port from environment or default
 	port := os.Getenv("PORT")
@@ -251,14 +254,18 @@ func (b *WhatsAppBridge) handleWebhookEvent(w http.ResponseWriter, r *http.Reque
 // processWebhook processes incoming webhook data
 func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) {
 	log.Println("🔍 Processing webhook data...")
-	
+
+	// Log the complete raw webhook for debugging
+	webhookJSON, _ := json.MarshalIndent(webhook, "", "  ")
+	log.Printf("📦 COMPLETE WEBHOOK BODY:\n%s\n", string(webhookJSON))
+
 	// Parse WhatsApp webhook structure
 	entry, ok := webhook["entry"].([]interface{})
 	if !ok || len(entry) == 0 {
 		log.Println("⚠️ No entry found in webhook")
 		return
 	}
-	
+
 	log.Printf("📊 Found %d entries", len(entry))
 	
 	// Get first entry
@@ -289,7 +296,32 @@ func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) {
 		
 		// Get the value directly - WhatsApp webhook structure has the field type inside value
 		if value, ok := changeData["value"].(map[string]interface{}); ok {
-			// Check for calls array directly in value
+			// Check for event_type field (used for outbound calls)
+			if eventType, ok := value["event_type"].(string); ok {
+				log.Printf("📞 Found event_type: %s", eventType)
+				if eventType == "call.connect" {
+					log.Printf("📞 Processing call.connect event (outbound call answer)")
+					// This is the webhook with SDP answer for outbound calls
+					callID, _ := value["call_id"].(string)
+					from, _ := value["from"].(string)
+
+					if session, ok := value["session"].(map[string]interface{}); ok {
+						sdpAnswer, _ := session["sdp"].(string)
+						sdpType, _ := session["sdp_type"].(string)
+
+						log.Printf("🔍 Session data: sdp_type=%s, sdp_length=%d", sdpType, len(sdpAnswer))
+
+						if sdpType == "answer" && sdpAnswer != "" {
+							log.Printf("📥 Received SDP answer for outbound call %s", callID)
+							log.Printf("📄 SDP Answer:\n%s", sdpAnswer)
+							// Process the answer asynchronously
+							go b.handleOutboundCallAnswer(callID, sdpAnswer, from)
+						}
+					}
+				}
+			}
+
+			// Check for calls array directly in value (used for inbound calls)
 			if calls, ok := value["calls"].([]interface{}); ok && len(calls) > 0 {
 				log.Printf("📞 Found %d call events", len(calls))
 				for _, call := range calls {
@@ -306,6 +338,14 @@ func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) {
 					if statusData, ok := status.(map[string]interface{}); ok {
 						if statusType, ok := statusData["type"].(string); ok && statusType == "call" {
 							log.Printf("📞 Found call status event")
+							// Log full status data for outbound calls
+							statusJSON, _ := json.MarshalIndent(statusData, "", "  ")
+							log.Printf("📋 Full status data:\n%s", string(statusJSON))
+
+							// When we get ACCEPTED, we should expect a connect webhook next
+							if callStatus, ok := statusData["status"].(string); ok && callStatus == "ACCEPTED" {
+								log.Printf("✅ Call ACCEPTED by user - waiting for connect webhook with SDP answer...")
+							}
 						}
 					}
 				}
@@ -336,12 +376,36 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 	direction, _ := callData["direction"].(string)
 	from, _ := callData["from"].(string)
 	to, _ := callData["to"].(string)
-	
+
 	log.Printf("📞 Call event: %s (ID: %s, Direction: %s, From: %s, To: %s)", event, callID, direction, from, to)
+
+	// For debugging, log all fields in the call data
+	log.Printf("🔍 Call data fields: %v", func() []string {
+		var fields []string
+		for k := range callData {
+			fields = append(fields, k)
+		}
+		return fields
+	}())
 	
 	// Log additional call data for debugging
 	if status, ok := callData["status"].(string); ok {
 		log.Printf("📞 Call status: %s", status)
+
+		// If status is FAILED, log the errors
+		if status == "FAILED" {
+			if errors, ok := callData["errors"].([]interface{}); ok && len(errors) > 0 {
+				log.Printf("❌ Call FAILED with %d errors:", len(errors))
+				for i, errObj := range errors {
+					if errData, ok := errObj.(map[string]interface{}); ok {
+						errJSON, _ := json.MarshalIndent(errData, "  ", "  ")
+						log.Printf("❌ Error %d:\n  %s", i+1, string(errJSON))
+					}
+				}
+			} else {
+				log.Printf("❌ Call FAILED but no error details available")
+			}
+		}
 	}
 	if timestamp, ok := callData["timestamp"].(string); ok {
 		log.Printf("📞 Call timestamp: %s", timestamp)
@@ -355,12 +419,32 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 			if session, ok := callData["session"].(map[string]interface{}); ok {
 				sdpOffer, _ := session["sdp"].(string)
 				sdpType, _ := session["sdp_type"].(string)
-				
+
 				if sdpType == "offer" && sdpOffer != "" {
-					log.Printf("📥 Received SDP offer for call %s", callID)
+					log.Printf("📥 Received SDP offer for inbound call %s", callID)
 					// Process the call asynchronously
 					go b.acceptIncomingCall(callID, sdpOffer, from)
 				}
+			}
+		} else if direction == "BUSINESS_INITIATED" {
+			// Handle outbound call - user answered with SDP answer
+			log.Printf("📥 User answered outbound call %s", callID)
+			if session, ok := callData["session"].(map[string]interface{}); ok {
+				sdpAnswer, _ := session["sdp"].(string)
+				sdpType, _ := session["sdp_type"].(string)
+
+				log.Printf("🔍 Session data: sdp_type=%s, sdp_length=%d", sdpType, len(sdpAnswer))
+
+				if sdpType == "answer" && sdpAnswer != "" {
+					log.Printf("📥 Received SDP answer for outbound call %s", callID)
+					log.Printf("📄 SDP Answer:\n%s", sdpAnswer)
+					// Process the answer asynchronously
+					go b.handleOutboundCallAnswer(callID, sdpAnswer, from)
+				} else {
+					log.Printf("⚠️ Invalid or missing SDP answer: type=%s, present=%v", sdpType, sdpAnswer != "")
+				}
+			} else {
+				log.Printf("⚠️ No session data in connect event for outbound call")
 			}
 		}
 		
@@ -853,7 +937,7 @@ func (b *WhatsAppBridge) callWhatsAppAPI(action, callID, sdpAnswer string) error
 		return fmt.Errorf("WhatsApp credentials not configured")
 	}
 	
-	url := fmt.Sprintf("https://graph.facebook.com/v18.0/%s/calls", b.phoneNumberID)
+	url := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/calls", b.phoneNumberID)
 	
 	payload := map[string]interface{}{
 		"messaging_product": "whatsapp",
@@ -1246,6 +1330,387 @@ func (b *WhatsAppBridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (b *WhatsAppBridge) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+}
+
+// handleInitiateCall initiates an outbound call to a WhatsApp user
+func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Request) {
+	log.Printf("📞 Received initiate-call request from %s", r.RemoteAddr)
+
+	var req struct {
+		To string `json:"to"` // Phone number to call (without +)
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("❌ Failed to decode request body: %v", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.To == "" {
+		log.Printf("❌ Phone number not provided in request")
+		http.Error(w, "Phone number required", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("📞 Initiating outbound call to %s", req.To)
+
+	// Create WebRTC peer connection
+	pc, err := b.api.NewPeerConnection(b.config)
+	if err != nil {
+		log.Printf("❌ Failed to create peer connection: %v", err)
+		http.Error(w, "Failed to create connection", http.StatusInternalServerError)
+		return
+	}
+
+	// Create audio track for sending audio to WhatsApp user
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{
+			MimeType:  "audio/opus",
+			ClockRate: 48000,
+			Channels:  2,
+		},
+		"audio",
+		"pion-stream",
+	)
+	if err != nil {
+		log.Printf("❌ Failed to create audio track: %v", err)
+		http.Error(w, "Failed to create audio track", http.StatusInternalServerError)
+		return
+	}
+
+	// Add track to peer connection
+	_, err = pc.AddTrack(audioTrack)
+	if err != nil {
+		log.Printf("❌ Failed to add track: %v", err)
+		http.Error(w, "Failed to add track", http.StatusInternalServerError)
+		return
+	}
+
+	// Handle ICE connection state changes
+	pc.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
+		log.Printf("🧊 Outbound call ICE state: %s", connectionState.String())
+	})
+
+	// Handle peer connection state changes
+	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		log.Printf("🔌 Outbound call connection state: %s", s.String())
+	})
+
+	// Create SDP offer
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		log.Printf("❌ Failed to create offer: %v", err)
+		http.Error(w, "Failed to create offer", http.StatusInternalServerError)
+		return
+	}
+
+	// Set local description
+	if err := pc.SetLocalDescription(offer); err != nil {
+		log.Printf("❌ Failed to set local description: %v", err)
+		http.Error(w, "Failed to set local description", http.StatusInternalServerError)
+		return
+	}
+
+	// Wait for ICE gathering to complete
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
+	<-gatherComplete
+
+	// Get complete SDP with ICE candidates
+	sdpOffer := pc.LocalDescription().SDP
+
+	log.Printf("📤 Sending outbound call request to WhatsApp API")
+	log.Printf("📄 SDP Offer length: %d bytes", len(sdpOffer))
+	log.Printf("📄 Full SDP Offer:\n%s", sdpOffer)
+	log.Printf("=====================================")
+
+	// Call WhatsApp API to initiate call
+	callID, err := b.initiateWhatsAppCall(req.To, sdpOffer)
+	if err != nil {
+		log.Printf("❌ Failed to initiate call: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to initiate call: %v", err), http.StatusInternalServerError)
+		pc.Close()
+		return
+	}
+
+	log.Printf("✅ Outbound call initiated: call_id=%s, to=%s", callID, req.To)
+
+	// Store the call
+	call := &Call{
+		ID:             callID,
+		PeerConnection: pc,
+		AudioTrack:     audioTrack,
+		StartTime:      time.Now(),
+	}
+
+	b.mu.Lock()
+	b.activeCalls[callID] = call
+	log.Printf("✅ Stored call in activeCalls map with key: %s", callID)
+	log.Printf("📊 Total active calls: %d", len(b.activeCalls))
+	b.mu.Unlock()
+
+	// Handle incoming audio from user
+	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("🔊 Received audio track from outbound call: %s (codec: %s)", track.ID(), track.Codec().MimeType)
+
+		// Forward audio to OpenAI when connected
+		go func() {
+			buf := make([]byte, 1400)
+			packetCount := 0
+			totalBytes := 0
+			openAIForwardingStarted := false
+
+			for {
+				n, _, readErr := track.Read(buf)
+				if readErr != nil {
+					log.Printf("❌ Error reading audio from outbound call after %d packets: %v", packetCount, readErr)
+					return
+				}
+
+				packetCount++
+				totalBytes += n
+
+				// Check for OpenAI client on every packet (it becomes available after answer is received)
+				b.mu.Lock()
+				activeCall, exists := b.activeCalls[callID]
+				var openAIClient *OpenAIRealtimeClient
+				if exists && activeCall != nil {
+					openAIClient = activeCall.OpenAIClient
+				}
+				b.mu.Unlock()
+
+				if openAIClient != nil {
+					// OpenAI client is available - forward the packet
+					if !openAIForwardingStarted {
+						log.Printf("🔄 OpenAI client available - starting outbound call audio forwarding")
+						openAIForwardingStarted = true
+					}
+
+					// Forward RTP packet to OpenAI
+					if err := openAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
+						if packetCount <= 3 {
+							log.Printf("❌ Error forwarding outbound call RTP to OpenAI: %v", err)
+						}
+					} else if packetCount == 1 || packetCount%100 == 0 {
+						if packetCount == 1 {
+							log.Printf("✅ First outbound call RTP packet forwarded to OpenAI!")
+						} else {
+							log.Printf("📦 Forwarded %d outbound call RTP packets (%d KB) to OpenAI",
+								packetCount, totalBytes/1024)
+						}
+					}
+				} else {
+					// OpenAI client not ready yet - just count packets
+					if packetCount%100 == 0 {
+						log.Printf("🎤 Received %d outbound call audio packets (waiting for OpenAI)", packetCount)
+					}
+				}
+			}
+		}()
+	})
+
+	// Respond with call ID
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"call_id": callID,
+		"status":  "ringing",
+		"to":      req.To,
+	})
+}
+
+// handleOutboundCallAnswer processes the SDP answer when user accepts outbound call
+func (b *WhatsAppBridge) handleOutboundCallAnswer(callID, sdpAnswer, from string) {
+	log.Printf("🔄 Processing outbound call answer for %s", callID)
+
+	// Get the call from active calls
+	b.mu.Lock()
+	log.Printf("🔍 Looking for call_id: %s", callID)
+	log.Printf("🔍 Active calls count: %d", len(b.activeCalls))
+
+	// Log all active call IDs for comparison
+	activeIDs := []string{}
+	for id := range b.activeCalls {
+		activeIDs = append(activeIDs, id)
+	}
+	log.Printf("🔍 Active call IDs: %v", activeIDs)
+
+	call, exists := b.activeCalls[callID]
+	b.mu.Unlock()
+
+	if !exists {
+		log.Printf("❌ Call %s not found in active calls", callID)
+		log.Printf("❌ This means the call_id from webhook doesn't match what we stored")
+		return
+	}
+
+	// Set remote description (user's SDP answer)
+	answer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  sdpAnswer,
+	}
+
+	if err := call.PeerConnection.SetRemoteDescription(answer); err != nil {
+		log.Printf("❌ Failed to set remote description: %v", err)
+		return
+	}
+
+	log.Printf("✅ Set remote SDP answer for call %s", callID)
+	log.Printf("✅ Outbound call %s connected - media should now flow", callID)
+
+	// Now connect to OpenAI for the conversation
+	azureKey := os.Getenv("AZURE_OPENAI_API_KEY")
+	openAIKey := os.Getenv("OPENAI_API_KEY")
+
+	apiKey := azureKey
+	if apiKey == "" {
+		apiKey = openAIKey
+	}
+
+	if apiKey != "" {
+		log.Printf("🤖 Starting AI integration for outbound call %s", callID)
+		go b.connectToOpenAIRealtime(callID, call.PeerConnection, apiKey)
+	}
+}
+
+// acceptOutboundCall sends the final accept to WhatsApp API for outbound call
+func (b *WhatsAppBridge) acceptOutboundCall(callID string) error {
+	url := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/calls", b.phoneNumberID)
+
+	// Get the call
+	b.mu.Lock()
+	call, exists := b.activeCalls[callID]
+	b.mu.Unlock()
+
+	if !exists {
+		return fmt.Errorf("call %s not found", callID)
+	}
+
+	// Get our local SDP
+	localSDP := call.PeerConnection.LocalDescription().SDP
+
+	reqBody := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"call_id":           callID,
+		"action":            "accept",
+		"session": map[string]string{
+			"sdp_type": "answer",
+			"sdp":      localSDP,
+		},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("📤 Sending accept for outbound call %s", callID)
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+b.accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("📡 WhatsApp API accept response: Status=%s, Body=%s", resp.Status, string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("accept failed: %s - %s", resp.Status, string(body))
+	}
+
+	log.Printf("✅ WhatsApp API accept successful for outbound call %s", callID)
+	return nil
+}
+
+// initiateWhatsAppCall calls WhatsApp API to initiate an outbound call
+func (b *WhatsAppBridge) initiateWhatsAppCall(phoneNumber, sdpOffer string) (string, error) {
+	url := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/calls", b.phoneNumberID)
+
+	reqBody := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"to":                phoneNumber,
+		"action":            "connect",
+		"session": map[string]string{
+			"sdp_type": "offer",
+			"sdp":      sdpOffer,
+		},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+b.accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	log.Printf("📡 WhatsApp API response: Status=%s, Body=%s", resp.Status, string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("❌ WhatsApp API error: Status=%s, Body=%s", resp.Status, string(body))
+		return "", fmt.Errorf("WhatsApp API error: %s - %s", resp.Status, string(body))
+	}
+
+	var result struct {
+		Calls []struct {
+			ID string `json:"id"`
+		} `json:"calls"`
+		Success          bool   `json:"success"`
+		MessagingProduct string `json:"messaging_product"`
+		Error            *struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    int    `json:"code"`
+		} `json:"error"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("❌ Failed to parse response: %v", err)
+		return "", err
+	}
+
+	if result.Error != nil {
+		log.Printf("❌ WhatsApp API returned error: %+v", result.Error)
+		return "", fmt.Errorf("WhatsApp API error: %s (code: %d)", result.Error.Message, result.Error.Code)
+	}
+
+	if len(result.Calls) == 0 {
+		log.Printf("❌ WhatsApp API response has no calls array")
+		return "", fmt.Errorf("no call_id in response")
+	}
+
+	callID := result.Calls[0].ID
+	log.Printf("✅ WhatsApp API returned call_id: %s", callID)
+	return callID, nil
 }
 
 func max(a, b int) int {
