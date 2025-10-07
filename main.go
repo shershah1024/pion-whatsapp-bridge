@@ -888,30 +888,19 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 	log.Printf("🎧 Waiting for OpenAI to send audio...")
 	
 	// Now that the call is accepted, start media flow
-	// Connect to OpenAI Realtime API if configured
-	// Check for Azure first, then fallback to OpenAI
+	// Connect to Azure OpenAI Realtime API if configured
 	azureKey := os.Getenv("AZURE_OPENAI_API_KEY")
-	openAIKey := os.Getenv("OPENAI_API_KEY")
 
-	apiKey := azureKey
-	if apiKey == "" {
-		apiKey = openAIKey
-	}
-
-	if apiKey != "" {
-		if azureKey != "" {
-			log.Printf("🔵 Azure OpenAI API key found, starting Azure AI integration...")
-		} else {
-			log.Printf("🤖 OpenAI API key found, starting AI integration...")
-		}
-		// Start OpenAI/Azure integration only after accept succeeds
+	if azureKey != "" {
+		log.Printf("🔵 Azure OpenAI API key found, starting Azure AI integration...")
+		// Start Azure integration only after accept succeeds
 		go func() {
 			// Small delay to ensure everything is ready
 			time.Sleep(500 * time.Millisecond)
-			b.connectToOpenAIRealtime(callID, pc, apiKey)
+			b.connectToOpenAIRealtime(callID, pc, azureKey)
 		}()
 	} else {
-		log.Printf("ℹ️ No OpenAI/Azure API key found, will play welcome message")
+		log.Printf("⚠️ AZURE_OPENAI_API_KEY not set - no AI agent will respond")
 		// Play a welcome message only after accept succeeds
 		go func() {
 			// Small delay to ensure media channel is ready
@@ -1448,6 +1437,21 @@ func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Reque
 	log.Printf("📊 Total active calls: %d", len(b.activeCalls))
 	b.mu.Unlock()
 
+	// Pre-connect to Azure OpenAI so it's ready when user answers
+	azureKey := os.Getenv("AZURE_OPENAI_API_KEY")
+
+	if azureKey != "" {
+		log.Printf("🔵 Pre-connecting to Azure OpenAI before user answers...")
+		go func() {
+			// Connect to Azure OpenAI in background while call is ringing
+			// This way Azure is ready immediately when user answers
+			b.connectToOpenAIRealtime(callID, pc, azureKey)
+			log.Printf("✅ Azure OpenAI pre-connected and ready for call %s", callID)
+		}()
+	} else {
+		log.Printf("⚠️ AZURE_OPENAI_API_KEY not set - no AI agent will respond")
+	}
+
 	// Handle incoming audio from user
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Printf("🔊 Received audio track from outbound call: %s (codec: %s)", track.ID(), track.Codec().MimeType)
@@ -1555,20 +1559,7 @@ func (b *WhatsAppBridge) handleOutboundCallAnswer(callID, sdpAnswer, from string
 
 	log.Printf("✅ Set remote SDP answer for call %s", callID)
 	log.Printf("✅ Outbound call %s connected - media should now flow", callID)
-
-	// Now connect to OpenAI for the conversation
-	azureKey := os.Getenv("AZURE_OPENAI_API_KEY")
-	openAIKey := os.Getenv("OPENAI_API_KEY")
-
-	apiKey := azureKey
-	if apiKey == "" {
-		apiKey = openAIKey
-	}
-
-	if apiKey != "" {
-		log.Printf("🤖 Starting AI integration for outbound call %s", callID)
-		go b.connectToOpenAIRealtime(callID, call.PeerConnection, apiKey)
-	}
+	log.Printf("🎙️ Azure OpenAI should already be connected and ready to respond")
 }
 
 // acceptOutboundCall sends the final accept to WhatsApp API for outbound call

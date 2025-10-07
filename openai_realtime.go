@@ -65,12 +65,16 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 		reqBody := map[string]interface{}{
 			"model": c.azureDeployment,
 			"voice": "alloy",
-			"instructions": "You are a helpful weather assistant. Speak ONLY in English. When someone asks about the weather, use the get_weather function to provide accurate, current weather information in English. Be friendly and concise in your responses. Never use German or any other language - only English.",
+			"modalities": []string{"audio", "text"},
+			"instructions": "You are a helpful weather assistant. IMMEDIATELY greet the caller when the call starts - do not wait for them to speak first. Say 'Hello! I'm your weather assistant. How can I help you today?' Speak ONLY in English. When someone asks about the weather, use the get_weather function to provide accurate, current weather information in English. Be friendly and concise in your responses. Never use German or any other language - only English.",
 			"turn_detection": map[string]interface{}{
 				"type":                "server_vad",
 				"threshold":           0.5,
-				"prefix_padding_ms":   300,
-				"silence_duration_ms": 200,
+				"prefix_padding_ms":   100,
+				"silence_duration_ms": 100,
+			},
+			"input_audio_transcription": map[string]interface{}{
+				"model": "whisper-1",
 			},
 			"tools": []map[string]interface{}{
 				{
@@ -321,13 +325,17 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 		config := map[string]interface{}{
 			"type": "session.update",
 			"session": map[string]interface{}{
-				"instructions": "You are a helpful weather assistant. Speak ONLY in English. When someone asks about the weather, use the get_weather function to provide accurate, current weather information in English. Be friendly and concise in your responses. Never use German or any other language - only English.",
+				"modalities": []string{"audio", "text"},
+				"instructions": "You are a helpful weather assistant. IMMEDIATELY greet the caller when the call starts - do not wait for them to speak first. Say 'Hello! I'm your weather assistant. How can I help you today?' Speak ONLY in English. When someone asks about the weather, use the get_weather function to provide accurate, current weather information in English. Be friendly and concise in your responses. Never use German or any other language - only English.",
 				"voice": "alloy",
 				"turn_detection": map[string]interface{}{
 					"type": "server_vad",
 					"threshold": 0.5,
-					"prefix_padding_ms": 300,
-					"silence_duration_ms": 200,
+					"prefix_padding_ms": 100,
+					"silence_duration_ms": 100,
+				},
+				"input_audio_transcription": map[string]interface{}{
+					"model": "whisper-1",
 				},
 				"tools": []map[string]interface{}{
 					{
@@ -376,19 +384,16 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			if session, ok := event["session"].(map[string]interface{}); ok {
 				log.Printf("📋 Session details: %+v", session)
 			}
-			// Trigger immediate greeting to avoid delay
-			go func() {
-				time.Sleep(100 * time.Millisecond) // Brief delay to ensure session is fully ready
-				greeting := map[string]interface{}{
-					"type": "response.create",
-				}
-				greetingJSON, _ := json.Marshal(greeting)
-				if err := c.dataChannel.SendText(string(greetingJSON)); err != nil {
-					log.Printf("❌ Failed to send initial greeting: %v", err)
-				} else {
-					log.Println("🎙️ Triggered initial greeting")
-				}
-			}()
+			// Trigger immediate greeting with NO delay
+			greeting := map[string]interface{}{
+				"type": "response.create",
+			}
+			greetingJSON, _ := json.Marshal(greeting)
+			if err := c.dataChannel.SendText(string(greetingJSON)); err != nil {
+				log.Printf("❌ Failed to send initial greeting: %v", err)
+			} else {
+				log.Println("🎙️ Triggered immediate greeting")
+			}
 		case "session.updated":
 			log.Println("✅ Session updated")
 			if session, ok := event["session"].(map[string]interface{}); ok {
