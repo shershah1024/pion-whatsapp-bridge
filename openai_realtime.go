@@ -24,10 +24,12 @@ type OpenAIRealtimeClient struct {
 	ephemeralToken   string
 	audioTrack       *webrtc.TrackLocalStaticRTP
 	remoteAudioTrack *webrtc.TrackRemote
+	phoneNumber      string
+	reminderText     string // If this is a reminder call, what to remind about
 }
 
 // NewOpenAIRealtimeClient creates a new OpenAI Realtime client
-func NewOpenAIRealtimeClient(apiKey string) *OpenAIRealtimeClient {
+func NewOpenAIRealtimeClient(apiKey, phoneNumber, reminderText string) *OpenAIRealtimeClient {
 	// Check if using Azure OpenAI
 	azureEndpoint := os.Getenv("AZURE_OPENAI_ENDPOINT")
 	azureDeployment := os.Getenv("AZURE_OPENAI_DEPLOYMENT")
@@ -36,11 +38,34 @@ func NewOpenAIRealtimeClient(apiKey string) *OpenAIRealtimeClient {
 		log.Printf("🔵 Using Azure OpenAI: %s", azureEndpoint)
 	}
 
+	if reminderText != "" {
+		log.Printf("⏰ Creating OpenAI client for reminder call: %s", reminderText)
+	}
+
 	return &OpenAIRealtimeClient{
 		apiKey:          apiKey,
 		azureEndpoint:   azureEndpoint,
 		azureDeployment: azureDeployment,
+		phoneNumber:     phoneNumber,
+		reminderText:    reminderText,
 	}
+}
+
+// getInstructions returns the appropriate instructions based on whether this is a reminder call
+func (c *OpenAIRealtimeClient) getInstructions() string {
+	if c.reminderText != "" {
+		// This is a reminder call - announce the reminder immediately
+		return fmt.Sprintf("You are Ziggy, a helpful voice assistant. This is a reminder call. IMMEDIATELY when the call starts, announce the reminder: 'Hello! This is Ziggy calling to remind you about: %s' Then ask if they have completed this task or would like to reschedule. Speak ONLY in English. Be friendly and concise.", c.reminderText)
+	}
+
+	// Detect user's timezone from phone number to provide context
+	timezone, err := GetTimezoneFromPhoneNumber(c.phoneNumber)
+	if err != nil {
+		timezone = "your local time" // Fallback if detection fails
+	}
+
+	// Regular call - standard instructions with timezone awareness
+	return fmt.Sprintf("You are Ziggy, a helpful voice assistant for task management and reminders. IMMEDIATELY greet the caller when the call starts - say 'Hello! I'm Ziggy, your assistant. How can I help you today?' Speak ONLY in English. You can help with: 1) Task management - create, list, and update tasks, 2) Reminders - set reminders and I'll call you back at the specified time. IMPORTANT: When setting reminders, convert user's time to a simple format: YYYY-MM-DD HH:MM (24-hour format). For example: '2 PM tomorrow' becomes '2025-11-09 14:00'. The user is in timezone %s. Be friendly, concise, and proactive in your responses.", timezone)
 }
 
 // EphemeralTokenResponse represents the response from the ephemeral token endpoint (GA)
@@ -64,9 +89,9 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 
 		reqBody := map[string]interface{}{
 			"model": c.azureDeployment,
-			"voice": "alloy",
+			"voice": "shimmer",
 			"modalities": []string{"audio", "text"},
-			"instructions": "You are a helpful weather assistant. IMMEDIATELY greet the caller when the call starts - do not wait for them to speak first. Say 'Hello! I'm your weather assistant. How can I help you today?' Speak ONLY in English. When someone asks about the weather, use the get_weather function to provide accurate, current weather information in English. Be friendly and concise in your responses. Never use German or any other language - only English.",
+			"instructions": c.getInstructions(),
 			"turn_detection": map[string]interface{}{
 				"type":                "server_vad",
 				"threshold":           0.5,
@@ -79,17 +104,115 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 			"tools": []map[string]interface{}{
 				{
 					"type":        "function",
-					"name":        "get_weather",
-					"description": "Get the current weather for a location. Return the response in English only.",
+					"name":        "add_task",
+					"description": "Create a new task for the caller. Use this when they ask to add, create, or remember a task or todo item.",
 					"parameters": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"location": map[string]interface{}{
+							"title": map[string]interface{}{
 								"type":        "string",
-								"description": "The city or location to get weather for",
+								"description": "Brief title of the task",
+							},
+							"description": map[string]interface{}{
+								"type":        "string",
+								"description": "Detailed description of the task (optional)",
+							},
+							"priority": map[string]interface{}{
+								"type":        "string",
+								"description": "Priority level: low, medium, high, or urgent",
+								"enum":        []string{"low", "medium", "high", "urgent"},
 							},
 						},
-						"required": []string{"location"},
+						"required": []string{"title"},
+					},
+				},
+				{
+					"type":        "function",
+					"name":        "list_tasks",
+					"description": "List all tasks for the caller. Can optionally filter by status.",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"status": map[string]interface{}{
+								"type":        "string",
+								"description": "Filter by status: pending, in_progress, completed, or cancelled (optional)",
+								"enum":        []string{"pending", "in_progress", "completed", "cancelled"},
+							},
+						},
+					},
+				},
+				{
+					"type":        "function",
+					"name":        "update_task_status",
+					"description": "Update the status of a task. Use when user wants to mark task as done, complete, in progress, etc.",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"task_id": map[string]interface{}{
+								"type":        "string",
+								"description": "The ID of the task to update",
+							},
+							"status": map[string]interface{}{
+								"type":        "string",
+								"description": "New status: pending, in_progress, completed, or cancelled",
+								"enum":        []string{"pending", "in_progress", "completed", "cancelled"},
+							},
+						},
+						"required": []string{"task_id", "status"},
+					},
+				},
+				{
+					"type":        "function",
+					"name":        "add_reminder",
+					"description": "Set a reminder for the caller. Supports one-time and recurring reminders. When the reminder time comes, Ziggy will call them back.",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"reminder_text": map[string]interface{}{
+								"type":        "string",
+								"description": "What to remind the user about",
+							},
+							"reminder_time": map[string]interface{}{
+								"type":        "string",
+								"description": "When to send the reminder in local timezone using format YYYY-MM-DD HH:MM (e.g., 2025-11-09 14:30 for 2:30 PM). Use 24-hour format. Ask the user for the exact date and time if not provided.",
+							},
+							"recurrence": map[string]interface{}{
+								"type":        "string",
+								"description": "Recurrence pattern: 'once' (default, one-time), 'daily', 'weekly', 'monthly', 'yearly'. Only specify if user wants recurring reminder.",
+								"enum":        []string{"once", "daily", "weekly", "monthly", "yearly"},
+							},
+						},
+						"required": []string{"reminder_text", "reminder_time"},
+					},
+				},
+				{
+					"type":        "function",
+					"name":        "list_reminders",
+					"description": "List all reminders for the caller. Can filter by status (pending, called, completed, cancelled).",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"status": map[string]interface{}{
+								"type":        "string",
+								"description": "Optional filter by status: 'pending', 'called', 'completed', 'cancelled'. If not provided, shows all reminders.",
+								"enum":        []string{"pending", "called", "completed", "cancelled"},
+							},
+						},
+					},
+				},
+				{
+					"type":        "function",
+					"name":        "cancel_reminder",
+					"description": "Cancel a reminder. Use this when user wants to stop or delete a reminder.",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"reminder_id": map[string]interface{}{
+								"type":        "string",
+								"description": "The ID of the reminder to cancel. Get this from list_reminders.",
+							},
+						},
+						"required": []string{"reminder_id"},
 					},
 				},
 			},
@@ -154,7 +277,7 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 			"model": "gpt-realtime",
 			"audio": map[string]interface{}{
 				"output": map[string]interface{}{
-					"voice": "alloy",
+					"voice": "shimmer",
 				},
 			},
 		},
@@ -326,8 +449,8 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 			"type": "session.update",
 			"session": map[string]interface{}{
 				"modalities": []string{"audio", "text"},
-				"instructions": "You are a helpful weather assistant. IMMEDIATELY greet the caller when the call starts - do not wait for them to speak first. Say 'Hello! I'm your weather assistant. How can I help you today?' Speak ONLY in English. When someone asks about the weather, use the get_weather function to provide accurate, current weather information in English. Be friendly and concise in your responses. Never use German or any other language - only English.",
-				"voice": "alloy",
+				"instructions": c.getInstructions(),
+				"voice": "shimmer",
 				"turn_detection": map[string]interface{}{
 					"type": "server_vad",
 					"threshold": 0.5,
@@ -340,17 +463,115 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 				"tools": []map[string]interface{}{
 					{
 						"type": "function",
-						"name": "get_weather",
-						"description": "Get the current weather for a location. Return the response in English only.",
+						"name": "add_task",
+						"description": "Create a new task for the caller. Use this when they ask to add, create, or remember a task or todo item.",
 						"parameters": map[string]interface{}{
 							"type": "object",
 							"properties": map[string]interface{}{
-								"location": map[string]interface{}{
+								"title": map[string]interface{}{
 									"type": "string",
-									"description": "The city or location to get weather for",
+									"description": "Brief title of the task",
+								},
+								"description": map[string]interface{}{
+									"type": "string",
+									"description": "Detailed description of the task (optional)",
+								},
+								"priority": map[string]interface{}{
+									"type": "string",
+									"description": "Priority level: low, medium, high, or urgent",
+									"enum": []string{"low", "medium", "high", "urgent"},
 								},
 							},
-							"required": []string{"location"},
+							"required": []string{"title"},
+						},
+					},
+					{
+						"type": "function",
+						"name": "list_tasks",
+						"description": "List all tasks for the caller. Can optionally filter by status.",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"status": map[string]interface{}{
+									"type": "string",
+									"description": "Filter by status: pending, in_progress, completed, or cancelled (optional)",
+									"enum": []string{"pending", "in_progress", "completed", "cancelled"},
+								},
+							},
+						},
+					},
+					{
+						"type": "function",
+						"name": "update_task_status",
+						"description": "Update the status of a task. Use when user wants to mark task as done, complete, in progress, etc.",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"task_id": map[string]interface{}{
+									"type": "string",
+									"description": "The ID of the task to update",
+								},
+								"status": map[string]interface{}{
+									"type": "string",
+									"description": "New status: pending, in_progress, completed, or cancelled",
+									"enum": []string{"pending", "in_progress", "completed", "cancelled"},
+								},
+							},
+							"required": []string{"task_id", "status"},
+						},
+					},
+					{
+						"type": "function",
+						"name": "add_reminder",
+						"description": "Set a reminder for the caller. Supports one-time and recurring reminders. When the reminder time comes, Ziggy will call them back.",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"reminder_text": map[string]interface{}{
+									"type": "string",
+									"description": "What to remind the user about",
+								},
+								"reminder_time": map[string]interface{}{
+									"type": "string",
+									"description": "When to send the reminder in local timezone using format YYYY-MM-DD HH:MM (e.g., 2025-11-09 14:30 for 2:30 PM). Use 24-hour format. Ask the user for the exact date and time if not provided.",
+								},
+								"recurrence": map[string]interface{}{
+									"type": "string",
+									"description": "Recurrence pattern: 'once' (default, one-time), 'daily', 'weekly', 'monthly', 'yearly'. Only specify if user wants recurring reminder.",
+									"enum": []string{"once", "daily", "weekly", "monthly", "yearly"},
+								},
+							},
+							"required": []string{"reminder_text", "reminder_time"},
+						},
+					},
+					{
+						"type": "function",
+						"name": "list_reminders",
+						"description": "List all reminders for the caller. Can filter by status (pending, called, completed, cancelled).",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"status": map[string]interface{}{
+									"type": "string",
+									"description": "Optional filter by status: 'pending', 'called', 'completed', 'cancelled'. If not provided, shows all reminders.",
+									"enum": []string{"pending", "called", "completed", "cancelled"},
+								},
+							},
+						},
+					},
+					{
+						"type": "function",
+						"name": "cancel_reminder",
+						"description": "Cancel a reminder. Use this when user wants to stop or delete a reminder.",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"reminder_id": map[string]interface{}{
+									"type": "string",
+									"description": "The ID of the reminder to cancel. Get this from list_reminders.",
+								},
+							},
+							"required": []string{"reminder_id"},
 						},
 					},
 				},
@@ -682,70 +903,228 @@ func (c *OpenAIRealtimeClient) handleFunctionCall(event map[string]interface{}) 
 	
 	log.Printf("📞 Function call: %s with args: %s", functionName, arguments)
 	
-	// Handle the weather function
-	if functionName == "get_weather" {
-		// Parse arguments
-		var args map[string]interface{}
+	// Parse arguments
+	var args map[string]interface{}
+	if arguments != "" {
 		if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 			log.Printf("❌ Failed to parse function arguments: %v", err)
 			return
 		}
-		
-		location, _ := args["location"].(string)
-		log.Printf("🌤️ Getting weather for: %s", location)
+	}
 
-		// Create mock weather response in English
-		conditions := []map[string]interface{}{
-			{"condition": "sunny", "description": "It is sunny and warm", "temp": 22},
-			{"condition": "cloudy", "description": "It is cloudy", "temp": 18},
-			{"condition": "rainy", "description": "It is raining", "temp": 15},
-			{"condition": "cold", "description": "It is cold", "temp": 5},
+	var resultJSON []byte
+
+	switch functionName {
+	case "add_task":
+		title, _ := args["title"].(string)
+		description, _ := args["description"].(string)
+		priority, _ := args["priority"].(string)
+
+		if priority == "" {
+			priority = "medium"
 		}
 
-		// Pick a random condition (simplified - just use first one for now)
-		weather := conditions[0]
+		log.Printf("📝 Adding task: %s (priority: %s)", title, priority)
 
-		weatherResult := map[string]interface{}{
-			"location": location,
-			"temperature_celsius": weather["temp"],
-			"condition": weather["condition"],
-			"description": weather["description"],
-		}
-
-		resultJSON, _ := json.Marshal(weatherResult)
-
-		// Send function result back
-		functionOutput := map[string]interface{}{
-			"type": "conversation.item.create",
-			"item": map[string]interface{}{
-				"type": "function_call_output",
-				"call_id": callID,
-				"output": string(resultJSON),
-			},
-		}
-
-		outputJSON, _ := json.Marshal(functionOutput)
-		if err := c.dataChannel.SendText(string(outputJSON)); err != nil {
-			log.Printf("❌ Failed to send function output: %v", err)
-			return
-		}
-
-		log.Printf("✅ Sent weather data for %s", location)
-
-		// Trigger model to respond with the weather data in English
-		responseCreate := map[string]interface{}{
-			"type": "response.create",
-			"response": map[string]interface{}{
-				"instructions": "Provide the weather information in English. Do not use German.",
-			},
-		}
-
-		responseJSON, _ := json.Marshal(responseCreate)
-		if err := c.dataChannel.SendText(string(responseJSON)); err != nil {
-			log.Printf("❌ Failed to trigger response: %v", err)
+		task, err := AddTask(title, description, priority, c.phoneNumber)
+		if err != nil {
+			log.Printf("❌ Failed to add task: %v", err)
+			errorResult := map[string]string{
+				"status": "error",
+				"message": fmt.Sprintf("Failed to create task: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
 		} else {
-			log.Printf("🎙️ Triggered model response for weather data")
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status": "success",
+				"message": fmt.Sprintf("Task '%s' created successfully", title),
+				"task_id": task.ID,
+				"title": task.Title,
+			})
+			log.Printf("✅ Task created: %s (ID: %s)", title, task.ID)
 		}
+
+	case "list_tasks":
+		status, _ := args["status"].(string)
+		log.Printf("📋 Listing tasks (status filter: %s)", status)
+
+		tasks, err := ListTasks(c.phoneNumber, status)
+		if err != nil {
+			log.Printf("❌ Failed to list tasks: %v", err)
+			errorResult := map[string]string{
+				"status": "error",
+				"message": fmt.Sprintf("Failed to list tasks: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
+		} else {
+			// Format tasks for the AI
+			taskList := make([]map[string]interface{}, len(tasks))
+			for i, task := range tasks {
+				taskList[i] = map[string]interface{}{
+					"id":          task.ID,
+					"title":       task.Title,
+					"description": task.Description,
+					"status":      task.Status,
+					"priority":    task.Priority,
+				}
+			}
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status": "success",
+				"count":  len(tasks),
+				"tasks":  taskList,
+			})
+			log.Printf("✅ Retrieved %d tasks", len(tasks))
+		}
+
+	case "update_task_status":
+		taskID, _ := args["task_id"].(string)
+		newStatus, _ := args["status"].(string)
+
+		log.Printf("🔄 Updating task %s to status: %s", taskID, newStatus)
+
+		err := UpdateTaskStatus(taskID, newStatus)
+		if err != nil {
+			log.Printf("❌ Failed to update task: %v", err)
+			errorResult := map[string]string{
+				"status": "error",
+				"message": fmt.Sprintf("Failed to update task: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
+		} else {
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status": "success",
+				"message": fmt.Sprintf("Task updated to %s", newStatus),
+				"task_id": taskID,
+			})
+			log.Printf("✅ Task %s updated to %s", taskID, newStatus)
+		}
+
+	case "add_reminder":
+		reminderText, _ := args["reminder_text"].(string)
+		reminderTime, _ := args["reminder_time"].(string)
+		recurrence, _ := args["recurrence"].(string)
+		if recurrence == "" {
+			recurrence = "once"
+		}
+
+		log.Printf("⏰ Adding %s reminder: %s at %s", recurrence, reminderText, reminderTime)
+
+		reminder, err := AddReminder(reminderText, reminderTime, c.phoneNumber, recurrence)
+		if err != nil {
+			log.Printf("❌ Failed to add reminder: %v", err)
+			errorResult := map[string]string{
+				"status": "error",
+				"message": fmt.Sprintf("Failed to create reminder: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
+		} else {
+			var message string
+			if recurrence == "once" {
+				message = fmt.Sprintf("Reminder set for %s. I'll call you back at that time.", reminderTime)
+			} else {
+				message = fmt.Sprintf("%s reminder set for %s. I'll call you back %s.",
+					recurrence, reminderTime, recurrence)
+			}
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status": "success",
+				"message": message,
+				"reminder_id": reminder.ID,
+				"reminder_text": reminder.ReminderText,
+				"reminder_time": reminder.ReminderTime,
+				"recurrence": reminder.RecurrencePattern,
+			})
+			log.Printf("✅ %s reminder created: %s at %s (ID: %s)", recurrence, reminderText, reminderTime, reminder.ID)
+		}
+
+	case "list_reminders":
+		status, _ := args["status"].(string)
+
+		log.Printf("📋 Listing reminders (status: %s)", status)
+
+		reminders, err := ListReminders(c.phoneNumber, status)
+		if err != nil {
+			log.Printf("❌ Failed to list reminders: %v", err)
+			errorResult := map[string]string{
+				"status": "error",
+				"message": fmt.Sprintf("Failed to list reminders: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
+		} else {
+			var reminderList []map[string]interface{}
+			for _, r := range reminders {
+				reminderList = append(reminderList, map[string]interface{}{
+					"id":          r.ID,
+					"text":        r.ReminderText,
+					"time":        r.ReminderTime,
+					"recurrence":  r.RecurrencePattern,
+					"status":      r.Status,
+				})
+			}
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status": "success",
+				"count":  len(reminders),
+				"reminders": reminderList,
+			})
+			log.Printf("✅ Retrieved %d reminders", len(reminders))
+		}
+
+	case "cancel_reminder":
+		reminderID, _ := args["reminder_id"].(string)
+
+		log.Printf("🗑️ Cancelling reminder: %s", reminderID)
+
+		err := CancelReminder(reminderID)
+		if err != nil {
+			log.Printf("❌ Failed to cancel reminder: %v", err)
+			errorResult := map[string]string{
+				"status": "error",
+				"message": fmt.Sprintf("Failed to cancel reminder: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
+		} else {
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status": "success",
+				"message": "Reminder cancelled successfully",
+				"reminder_id": reminderID,
+			})
+			log.Printf("✅ Reminder %s cancelled", reminderID)
+		}
+
+	default:
+		log.Printf("⚠️ Unknown function: %s", functionName)
+		errorResult := map[string]string{
+			"status": "error",
+			"message": fmt.Sprintf("Unknown function: %s", functionName),
+		}
+		resultJSON, _ = json.Marshal(errorResult)
+	}
+
+	// Send function result back
+	functionOutput := map[string]interface{}{
+		"type": "conversation.item.create",
+		"item": map[string]interface{}{
+			"type":    "function_call_output",
+			"call_id": callID,
+			"output":  string(resultJSON),
+		},
+	}
+
+	outputJSON, _ := json.Marshal(functionOutput)
+	if err := c.dataChannel.SendText(string(outputJSON)); err != nil {
+		log.Printf("❌ Failed to send function output: %v", err)
+		return
+	}
+
+	// Trigger model to respond
+	responseCreate := map[string]interface{}{
+		"type": "response.create",
+	}
+
+	responseJSON, _ := json.Marshal(responseCreate)
+	if err := c.dataChannel.SendText(string(responseJSON)); err != nil {
+		log.Printf("❌ Failed to trigger response: %v", err)
+	} else {
+		log.Printf("🎙️ Triggered model response")
 	}
 }
 

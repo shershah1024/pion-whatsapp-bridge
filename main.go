@@ -40,6 +40,8 @@ type Call struct {
 	AudioTrack     *webrtc.TrackLocalStaticRTP
 	StartTime      time.Time
 	OpenAIClient   *OpenAIRealtimeClient
+	ReminderID     string // If this is a reminder call
+	ReminderText   string // What to remind the user about
 }
 
 // NewWhatsAppBridge creates a new bridge instance
@@ -161,7 +163,10 @@ func (b *WhatsAppBridge) Start() {
 
 	// Outbound call endpoint
 	router.HandleFunc("/initiate-call", b.handleInitiateCall).Methods("POST")
-	
+
+	// Reminders cron endpoint - called by Supabase cron job
+	router.HandleFunc("/check-reminders", b.handleCheckReminders).Methods("POST", "GET")
+
 	// Get port from environment or default
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -897,7 +902,7 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		go func() {
 			// Small delay to ensure everything is ready
 			time.Sleep(500 * time.Millisecond)
-			b.connectToOpenAIRealtime(callID, pc, azureKey)
+			b.connectToOpenAIRealtime(callID, pc, azureKey, callerNumber, "") // No reminder for inbound calls
 		}()
 	} else {
 		log.Printf("⚠️ AZURE_OPENAI_API_KEY not set - no AI agent will respond")
@@ -987,11 +992,11 @@ func (b *WhatsAppBridge) callWhatsAppAPI(action, callID, sdpAnswer string) error
 }
 
 // connectToOpenAIRealtime connects the WhatsApp call to OpenAI's Realtime API
-func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webrtc.PeerConnection, apiKey string) {
-	log.Printf("🤖 Connecting call %s to OpenAI Realtime API", callID)
-	
-	// Create OpenAI client
-	openAIClient := NewOpenAIRealtimeClient(apiKey)
+func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webrtc.PeerConnection, apiKey string, phoneNumber string, reminderText string) {
+	log.Printf("🤖 Connecting call %s to OpenAI Realtime API (caller: %s)", callID, phoneNumber)
+
+	// Create OpenAI client with phone number for task context and optional reminder
+	openAIClient := NewOpenAIRealtimeClient(apiKey, phoneNumber, reminderText)
 	
 	// Get ephemeral token
 	if err := openAIClient.GetEphemeralToken(); err != nil {
@@ -1326,7 +1331,9 @@ func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Reque
 	log.Printf("📞 Received initiate-call request from %s", r.RemoteAddr)
 
 	var req struct {
-		To string `json:"to"` // Phone number to call (without +)
+		To           string `json:"to"`            // Phone number to call (without +)
+		ReminderID   string `json:"reminder_id"`   // Optional: ID of reminder if this is a reminder call
+		ReminderText string `json:"reminder_text"` // Optional: What to remind about
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1429,6 +1436,13 @@ func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Reque
 		PeerConnection: pc,
 		AudioTrack:     audioTrack,
 		StartTime:      time.Now(),
+		ReminderID:     req.ReminderID,
+		ReminderText:   req.ReminderText,
+	}
+
+	// Log if this is a reminder call
+	if req.ReminderID != "" {
+		log.Printf("⏰ This is a reminder call: %s", req.ReminderText)
 	}
 
 	b.mu.Lock()
@@ -1445,7 +1459,7 @@ func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Reque
 		go func() {
 			// Connect to Azure OpenAI in background while call is ringing
 			// This way Azure is ready immediately when user answers
-			b.connectToOpenAIRealtime(callID, pc, azureKey)
+			b.connectToOpenAIRealtime(callID, pc, azureKey, req.To, req.ReminderText)
 			log.Printf("✅ Azure OpenAI pre-connected and ready for call %s", callID)
 		}()
 	} else {
@@ -1518,6 +1532,80 @@ func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Reque
 		"call_id": callID,
 		"status":  "ringing",
 		"to":      req.To,
+	})
+}
+
+// handleCheckReminders checks for due reminders and initiates calls
+func (b *WhatsAppBridge) handleCheckReminders(w http.ResponseWriter, r *http.Request) {
+	log.Printf("⏰ Checking for due reminders...")
+
+	// Get all due reminders
+	reminders, err := GetDueReminders()
+	if err != nil {
+		log.Printf("❌ Failed to get due reminders: %v", err)
+		http.Error(w, "Failed to check reminders", http.StatusInternalServerError)
+		return
+	}
+
+	if len(reminders) == 0 {
+		log.Printf("✅ No due reminders found")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "success",
+			"message": "No due reminders",
+			"count":   0,
+		})
+		return
+	}
+
+	log.Printf("📞 Found %d due reminders, initiating calls...", len(reminders))
+
+	calledCount := 0
+	failedCount := 0
+
+	for _, reminder := range reminders {
+		log.Printf("📞 Calling %s for reminder: %s", reminder.PhoneNumber, reminder.ReminderText)
+
+		// Make the request to initiate call
+		req := struct {
+			To           string `json:"to"`
+			ReminderText string `json:"reminder_text,omitempty"`
+			ReminderID   string `json:"reminder_id,omitempty"`
+		}{
+			To:           reminder.PhoneNumber,
+			ReminderText: reminder.ReminderText,
+			ReminderID:   reminder.ID,
+		}
+
+		jsonData, _ := json.Marshal(req)
+		resp, err := http.Post("http://localhost:3011/initiate-call", "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			log.Printf("❌ Failed to initiate call for reminder %s: %v", reminder.ID, err)
+			failedCount++
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			// Update reminder status to 'called'
+			if err := UpdateReminderStatus(reminder.ID, "called", ""); err != nil {
+				log.Printf("⚠️ Failed to update reminder status: %v", err)
+			} else {
+				log.Printf("✅ Reminder call initiated for %s", reminder.PhoneNumber)
+				calledCount++
+			}
+		} else {
+			log.Printf("❌ Failed to initiate call, status: %d", resp.StatusCode)
+			failedCount++
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "success",
+		"message": fmt.Sprintf("Processed %d reminders", len(reminders)),
+		"called":  calledCount,
+		"failed":  failedCount,
 	})
 }
 
