@@ -24,13 +24,14 @@ const (
 
 // WhatsAppBridge handles WhatsApp call bridging using Pion WebRTC
 type WhatsAppBridge struct {
-	api           *webrtc.API
-	config        webrtc.Configuration
-	activeCalls   map[string]*Call
-	mu            sync.Mutex
-	verifyToken   string
-	accessToken   string
-	phoneNumberID string
+	api                 *webrtc.API
+	config              webrtc.Configuration
+	activeCalls         map[string]*Call
+	mu                  sync.Mutex
+	verifyToken         string
+	accessToken         string
+	phoneNumberID       string
+	allowedPhoneNumber  string // Only process webhooks from this display phone number
 }
 
 // Call represents an active WhatsApp call session
@@ -134,14 +135,24 @@ func NewWhatsAppBridge() *WhatsAppBridge {
 	if phoneNumberID == "" {
 		log.Println("⚠️  PHONE_NUMBER_ID not set - API calls will fail")
 	}
-	
+
+	// Get allowed phone number for security filtering (only process webhooks from this number)
+	allowedPhoneNumber := os.Getenv("ALLOWED_DISPLAY_PHONE_NUMBER")
+	if allowedPhoneNumber == "" {
+		allowedPhoneNumber = "917306356514" // Default to your phone number
+		log.Printf("ℹ️  ALLOWED_DISPLAY_PHONE_NUMBER not set, defaulting to: %s", allowedPhoneNumber)
+	} else {
+		log.Printf("🔒 Only processing webhooks from display phone number: %s", allowedPhoneNumber)
+	}
+
 	return &WhatsAppBridge{
-		api:           api,
-		config:        config,
-		activeCalls:   make(map[string]*Call),
-		verifyToken:   verifyToken,
-		accessToken:   accessToken,
-		phoneNumberID: phoneNumberID,
+		api:                api,
+		config:             config,
+		activeCalls:        make(map[string]*Call),
+		verifyToken:        verifyToken,
+		accessToken:        accessToken,
+		phoneNumberID:      phoneNumberID,
+		allowedPhoneNumber: allowedPhoneNumber,
 	}
 }
 
@@ -301,6 +312,21 @@ func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) {
 		
 		// Get the value directly - WhatsApp webhook structure has the field type inside value
 		if value, ok := changeData["value"].(map[string]interface{}); ok {
+			// Security check: Only process webhooks from our specific phone number
+			if metadata, ok := value["metadata"].(map[string]interface{}); ok {
+				displayPhoneNumber, _ := metadata["display_phone_number"].(string)
+				allowedPhoneNumber := "917306356514"
+
+				if displayPhoneNumber != allowedPhoneNumber {
+					log.Printf("🚫 Ignoring webhook from unauthorized phone number: %s (expected: %s)",
+						displayPhoneNumber, allowedPhoneNumber)
+					return
+				}
+				log.Printf("✅ Phone number verified: %s", displayPhoneNumber)
+			} else {
+				log.Printf("⚠️ No metadata found in webhook value, skipping security check")
+			}
+
 			// Check for event_type field (used for outbound calls)
 			if eventType, ok := value["event_type"].(string); ok {
 				log.Printf("📞 Found event_type: %s", eventType)
@@ -335,7 +361,9 @@ func (b *WhatsAppBridge) processWebhook(webhook map[string]interface{}) {
 					}
 				}
 			} else if messages, ok := value["messages"].([]interface{}); ok && len(messages) > 0 {
-				log.Printf("💬 Found %d message events (ignoring)", len(messages))
+				log.Printf("💬 Found %d message events", len(messages))
+				// Handle messages using the messaging SDK
+				go b.handleMessageEvents(webhook)
 			} else if statuses, ok := value["statuses"].([]interface{}); ok && len(statuses) > 0 {
 				log.Printf("📊 Found %d status events", len(statuses))
 				// Check if any are call statuses
@@ -494,11 +522,212 @@ func (b *WhatsAppBridge) handleCallEvent(callData map[string]interface{}) {
 	}
 }
 
+// handleMessageEvents processes incoming WhatsApp messages
+func (b *WhatsAppBridge) handleMessageEvents(webhook map[string]interface{}) {
+	log.Println("💬 Processing message events...")
+
+	// Initialize messaging SDK
+	wa := NewWhatsAppSDK("", "")
+	handler := wa.WebhookHandler()
+
+	// Convert webhook to JSON bytes for parsing
+	webhookJSON, err := json.Marshal(webhook)
+	if err != nil {
+		log.Printf("❌ Failed to marshal webhook: %v", err)
+		return
+	}
+
+	// Parse webhook data
+	if err := handler.Parse(webhookJSON); err != nil {
+		log.Printf("❌ Failed to parse message webhook: %v", err)
+		return
+	}
+
+	// Check for duplicate messages
+	if handler.IsDuplicate() {
+		log.Printf("🔁 Duplicate message ignored")
+		return
+	}
+
+	// Get message details
+	sender := handler.Sender()
+	text := handler.Text()
+	msgType := handler.MessageType()
+	contactName := handler.ContactName()
+
+	log.Printf("📨 Message from %s (%s): Type=%s, Text=%s", contactName, sender, msgType, text)
+
+	// Handle different message types
+	switch msgType {
+	case "text":
+		b.handleTextMessage(handler, text, sender)
+	case "interactive":
+		b.handleInteractiveMessage(handler, text, sender)
+	case "audio":
+		b.handleAudioMessage(handler, sender)
+	case "image":
+		b.handleImageMessage(handler, sender)
+	case "video":
+		b.handleVideoMessage(handler, sender)
+	default:
+		log.Printf("⚠️ Unknown message type: %s", msgType)
+	}
+}
+
+// handleTextMessage handles incoming text messages using LLM
+func (b *WhatsAppBridge) handleTextMessage(handler *WebhookHandler, text, sender string) {
+	log.Printf("💬 Handling text message: %s", text)
+
+	// Create LLM handler for this user
+	llmHandler := NewLLMTextHandler(sender)
+
+	// Save incoming message to Supabase
+	messageID := handler.MessageID()
+	contactName := handler.ContactName()
+	if err := llmHandler.SaveMessage(text, "inbound", messageID, contactName); err != nil {
+		log.Printf("⚠️ Failed to save incoming message: %v", err)
+	}
+
+	// Get AI response
+	aiResponse, err := llmHandler.GetAIResponse(text)
+	if err != nil {
+		log.Printf("❌ Failed to get AI response: %v", err)
+		// Fallback response if AI fails
+		aiResponse = "I'm having trouble thinking right now. Can you try again? 🤔"
+	}
+
+	// Send response
+	if _, err := handler.ReplyText(aiResponse); err != nil {
+		log.Printf("❌ Failed to send response: %v", err)
+		return
+	}
+
+	// Save outbound message to Supabase
+	if err := llmHandler.SaveMessage(aiResponse, "outbound", "", contactName); err != nil {
+		log.Printf("⚠️ Failed to save outbound message: %v", err)
+	}
+
+	log.Printf("✅ AI conversation completed for %s", sender)
+}
+
+// handleInteractiveMessage handles button/list replies
+func (b *WhatsAppBridge) handleInteractiveMessage(handler *WebhookHandler, selection, sender string) {
+	log.Printf("🔘 User selected: %s", selection)
+
+	switch selection {
+	case "Call Me":
+		handler.ReplyText("📞 Initiating voice call...")
+		// Initiate an outbound call
+		go func() {
+			callID, err := b.initiateWhatsAppCall(sender, "")
+			if err != nil {
+				log.Printf("❌ Failed to initiate call: %v", err)
+			} else {
+				log.Printf("✅ Initiated call: %s", callID)
+			}
+		}()
+
+	case "Check Status":
+		b.handleTextMessage(handler, "status", sender)
+
+	case "Help":
+		b.handleTextMessage(handler, "help", sender)
+
+	default:
+		handler.ReplyText("Got your selection: " + selection)
+	}
+}
+
+// handleAudioMessage handles incoming audio messages
+func (b *WhatsAppBridge) handleAudioMessage(handler *WebhookHandler, sender string) {
+	audioID := handler.AudioID()
+	if audioID == "" {
+		log.Printf("⚠️ No audio ID found in message")
+		return
+	}
+
+	log.Printf("🎤 Received audio message: %s from %s", audioID, sender)
+
+	// Download the audio file
+	filename := "audio_" + audioID + ".ogg"
+	savedPath, err := handler.client.DownloadMedia(audioID, filename)
+	if err != nil {
+		log.Printf("❌ Error downloading audio: %v", err)
+		handler.ReplyText("Sorry, I couldn't process your audio message.")
+		return
+	}
+
+	log.Printf("✅ Audio saved to: %s", savedPath)
+	handler.ReplyText("🎧 Thanks for the audio message! I've received it.")
+
+	// Here you could:
+	// 1. Transcribe the audio using OpenAI Whisper
+	// 2. Process the audio for voice commands
+	// 3. Store it in a database
+}
+
+// handleImageMessage handles incoming image messages
+func (b *WhatsAppBridge) handleImageMessage(handler *WebhookHandler, sender string) {
+	imageID := handler.ImageID()
+	if imageID == "" {
+		log.Printf("⚠️ No image ID found in message")
+		return
+	}
+
+	log.Printf("🖼️ Received image message: %s from %s", imageID, sender)
+
+	// Download the image file
+	filename := "image_" + imageID + ".jpg"
+	savedPath, err := handler.client.DownloadMedia(imageID, filename)
+	if err != nil {
+		log.Printf("❌ Error downloading image: %v", err)
+		handler.ReplyText("Sorry, I couldn't process your image.")
+		return
+	}
+
+	log.Printf("✅ Image saved to: %s", savedPath)
+	handler.ReplyText("📸 Great image! I've received it.")
+
+	// Here you could:
+	// 1. Use GPT-4 Vision to analyze the image
+	// 2. Extract text using OCR
+	// 3. Perform image recognition
+}
+
+// handleVideoMessage handles incoming video messages
+func (b *WhatsAppBridge) handleVideoMessage(handler *WebhookHandler, sender string) {
+	videoID := handler.VideoID()
+	if videoID == "" {
+		log.Printf("⚠️ No video ID found in message")
+		return
+	}
+
+	log.Printf("🎥 Received video message: %s from %s", videoID, sender)
+
+	// Download the video file
+	filename := "video_" + videoID + ".mp4"
+	savedPath, err := handler.client.DownloadMedia(videoID, filename)
+	if err != nil {
+		log.Printf("❌ Error downloading video: %v", err)
+		handler.ReplyText("Sorry, I couldn't process your video.")
+		return
+	}
+
+	log.Printf("✅ Video saved to: %s", savedPath)
+	handler.ReplyText("🎬 Thanks for the video! I've received it.")
+}
+
 // acceptIncomingCall handles accepting an incoming WhatsApp call
 func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber string) {
 	log.Printf("🔔 Processing incoming call %s from %s", callID, callerNumber)
 	log.Printf("📋 Call flow: 1) Create PeerConnection → 2) Set SDP → 3) Pre-accept → 4) Accept → 5) Media flow")
-	
+
+	// Grant call permission automatically - user calling us grants implicit permission for callbacks
+	if err := GrantCallPermission(callerNumber); err != nil {
+		log.Printf("⚠️ Failed to grant call permission for %s: %v", callerNumber, err)
+		// Continue anyway - permission tracking is not critical for call handling
+	}
+
 	// Check if call is already being processed
 	b.mu.Lock()
 	if _, exists := b.activeCalls[callID]; exists {
@@ -1346,6 +1575,19 @@ func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Reque
 		log.Printf("❌ Phone number not provided in request")
 		http.Error(w, "Phone number required", http.StatusBadRequest)
 		return
+	}
+
+	// Check if we have permission to call this number
+	permission, err := CheckCallPermission(req.To)
+	if err != nil {
+		log.Printf("⚠️ Error checking call permission for %s: %v", req.To, err)
+		// Continue anyway - if Supabase is down, we don't want to block calls
+	} else if permission == nil {
+		log.Printf("🚫 No call permission for %s - user has not called us first", req.To)
+		http.Error(w, "No call permission from recipient. They must call you first to grant permission.", http.StatusForbidden)
+		return
+	} else {
+		log.Printf("✅ Call permission verified for %s (granted on %s)", req.To, permission.FirstInboundCallAt)
 	}
 
 	log.Printf("📞 Initiating outbound call to %s", req.To)

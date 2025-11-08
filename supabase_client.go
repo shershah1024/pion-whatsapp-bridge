@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/nyaruka/phonenumbers"
@@ -196,6 +197,11 @@ type ZiggyReminder struct {
 // GetTimezoneFromPhoneNumber detects the timezone based on the phone number's country code
 // Returns the IANA timezone name (e.g., "Asia/Kolkata", "America/New_York")
 func GetTimezoneFromPhoneNumber(phoneNumber string) (string, error) {
+	// Add + prefix if not present (required by phonenumbers library)
+	if !strings.HasPrefix(phoneNumber, "+") {
+		phoneNumber = "+" + phoneNumber
+	}
+
 	// Parse the phone number
 	num, err := phonenumbers.Parse(phoneNumber, "")
 	if err != nil {
@@ -554,4 +560,202 @@ func ListReminders(phoneNumber string, status string) ([]ZiggyReminder, error) {
 // The database trigger will automatically unschedule the cron job
 func CancelReminder(reminderID string) error {
 	return UpdateReminderStatus(reminderID, "cancelled", "")
+}
+
+// WhatsAppCallPermission represents a call permission record
+type WhatsAppCallPermission struct {
+	ID                 string `json:"id,omitempty"`
+	PhoneNumber        string `json:"phone_number"`
+	FirstInboundCallAt string `json:"first_inbound_call_at,omitempty"`
+	LastInboundCallAt  string `json:"last_inbound_call_at,omitempty"`
+	PermissionGranted  bool   `json:"permission_granted"`
+	TotalInboundCalls  int    `json:"total_inbound_calls,omitempty"`
+	CreatedAt          string `json:"created_at,omitempty"`
+	UpdatedAt          string `json:"updated_at,omitempty"`
+}
+
+// GrantCallPermission records that a user has granted call permission by calling us first
+// This is called automatically when we receive an inbound call
+// If the user already exists, it updates the last_inbound_call_at and increments the counter
+func GrantCallPermission(phoneNumber string) error {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
+
+	if supabaseURL == "" || supabaseKey == "" {
+		return fmt.Errorf("Supabase credentials not configured")
+	}
+
+	// First, check if permission already exists
+	existing, err := CheckCallPermission(phoneNumber)
+	if err == nil && existing != nil {
+		// Update existing record: increment counter and update last call time
+		update := map[string]interface{}{
+			"last_inbound_call_at": time.Now().UTC().Format(time.RFC3339),
+			"total_inbound_calls":  existing.TotalInboundCalls + 1,
+			"permission_granted":   true, // Re-grant if it was revoked
+			"updated_at":           time.Now().UTC().Format(time.RFC3339),
+		}
+
+		jsonData, err := json.Marshal(update)
+		if err != nil {
+			return err
+		}
+
+		url := fmt.Sprintf("%s/rest/v1/whatsapp_call_permissions?phone_number=eq.%s", supabaseURL, phoneNumber)
+		req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return err
+		}
+
+		req.Header.Set("apikey", supabaseKey)
+		req.Header.Set("Authorization", "Bearer "+supabaseKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			return fmt.Errorf("Supabase error updating permission: %s - %s", resp.Status, string(body))
+		}
+
+		log.Printf("✅ Updated call permission for %s (total calls: %d)", phoneNumber, existing.TotalInboundCalls+1)
+		return nil
+	}
+
+	// Create new permission record
+	permission := WhatsAppCallPermission{
+		PhoneNumber:       phoneNumber,
+		PermissionGranted: true,
+		TotalInboundCalls: 1,
+	}
+
+	jsonData, err := json.Marshal(permission)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/whatsapp_call_permissions", supabaseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=representation")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Supabase error creating permission: %s - %s", resp.Status, string(body))
+	}
+
+	log.Printf("✅ Granted call permission for %s (first inbound call)", phoneNumber)
+	return nil
+}
+
+// CheckCallPermission checks if a phone number has permission to receive calls
+// Returns the permission record if it exists and is granted, nil otherwise
+func CheckCallPermission(phoneNumber string) (*WhatsAppCallPermission, error) {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
+
+	if supabaseURL == "" || supabaseKey == "" {
+		return nil, fmt.Errorf("Supabase credentials not configured")
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/whatsapp_call_permissions?phone_number=eq.%s&permission_granted=eq.true",
+		supabaseURL, phoneNumber)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Supabase error: %s - %s", resp.Status, string(body))
+	}
+
+	var permissions []WhatsAppCallPermission
+	if err := json.Unmarshal(body, &permissions); err != nil {
+		return nil, err
+	}
+
+	if len(permissions) == 0 {
+		return nil, nil // No permission found
+	}
+
+	return &permissions[0], nil
+}
+
+// RevokeCallPermission revokes call permission for a phone number
+// This can be called if a user opts out or requests to stop receiving calls
+func RevokeCallPermission(phoneNumber string) error {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
+
+	if supabaseURL == "" || supabaseKey == "" {
+		return fmt.Errorf("Supabase credentials not configured")
+	}
+
+	update := map[string]interface{}{
+		"permission_granted": false,
+		"updated_at":         time.Now().UTC().Format(time.RFC3339),
+	}
+
+	jsonData, err := json.Marshal(update)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/whatsapp_call_permissions?phone_number=eq.%s", supabaseURL, phoneNumber)
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("Supabase error: %s - %s", resp.Status, string(body))
+	}
+
+	log.Printf("🚫 Revoked call permission for %s", phoneNumber)
+	return nil
 }

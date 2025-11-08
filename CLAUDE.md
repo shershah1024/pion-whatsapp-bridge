@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A pure Go WebRTC bridge for handling WhatsApp voice calls using Pion WebRTC. This system receives WhatsApp call webhooks, establishes WebRTC connections, and enables real-time voice communication between WhatsApp users and AI voice assistants (OpenAI/Azure OpenAI Realtime API).
+A pure Go WebRTC bridge for handling WhatsApp **voice calls AND text messaging** using Pion WebRTC. This system receives WhatsApp webhooks, establishes WebRTC connections for calls, and enables:
+
+1. **Voice Calls**: Real-time voice communication between WhatsApp users and AI voice assistants (OpenAI/Azure OpenAI Realtime API)
+2. **Text Messaging**: Send and receive text messages, interactive buttons, media (images, audio, video)
+3. **Unified Integration**: Text messages can trigger voice calls, creating a seamless multi-modal experience
 
 **Why Pion over Janus Gateway:**
 - Native ice-lite support built-in
@@ -63,6 +67,14 @@ curl http://localhost:3011/health
 - Bidirectional audio forwarding via RTP packets
 - Data channel for Realtime API events (session config, transcriptions, function calls)
 - Weather function implementation as example tool
+
+**whatsapp_sdk.go** - WhatsApp Messaging SDK:
+- `WhatsAppClient` - Send text, images, audio, video, interactive buttons, templates
+- `WebhookHandler` - Parse incoming messages with helper methods
+- `WhatsAppSDK` - Main SDK entry point with convenience methods
+- Integrated into existing webhook (same `/whatsapp-call` endpoint handles both calls and messages)
+- Duplicate message detection, media download, thread-safe processing
+- Text messages can trigger voice calls (e.g., "Call Me" button initiates outbound call)
 
 **audio_processor.go** - Audio processing utilities (if present)
 
@@ -167,11 +179,18 @@ whatsappTrack.Write(rtpBytes)
 ## API Endpoints
 
 - `GET /whatsapp-call` - Webhook verification (responds with challenge)
-- `POST /whatsapp-call` - Webhook events (call events, status updates)
+- `POST /whatsapp-call` - **Unified webhook** for call events, message events, and status updates
 - `POST /test-call` - Test endpoint with SDP support
 - `POST /initiate-call` - Initiate outbound call (body: `{"to": "14085551234"}`)
 - `GET /status` - Bridge status and active calls count
 - `GET /health` - Health check
+
+### Webhook Event Types Handled
+
+The `/whatsapp-call` endpoint automatically routes different event types:
+- **Call Events**: `connect`, `terminate`, `ringing`, `answered` → handled by `handleCallEvent()`
+- **Message Events**: Text, audio, image, video, interactive → handled by `handleMessageEvents()`
+- **Status Events**: Call status updates (ACCEPTED, FAILED, etc.) → logged and tracked
 
 ## WhatsApp API Integration
 
@@ -259,11 +278,13 @@ whatsappTrack.Write(rtpBytes)
 
 ## Important File References
 
+- **MESSAGING_SDK.md** - WhatsApp Messaging SDK documentation (text, media, buttons, templates)
 - **WEBRTC_FLOW.md** - Detailed WebRTC connection flow and common mistakes
 - **OPENAI_INTEGRATION.md** - OpenAI Realtime API integration details
 - **OUTBOUND_CALLS_GUIDE.md** - Complete guide for business-initiated calls
 - **CURRENT_STATUS.md** - Latest debugging status and known issues
 - **TROUBLESHOOTING.md** - Common problems and solutions
+- **whatsapp_sdk_example.go** - Example usage of messaging SDK with various message types
 
 ## Code Patterns to Follow
 

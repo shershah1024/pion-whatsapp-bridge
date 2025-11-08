@@ -59,15 +59,14 @@ func (c *OpenAIRealtimeClient) getInstructions() string {
 	}
 
 	// Detect user's timezone from phone number to provide context
-	timezone, err := GetTimezoneFromPhoneNumber(c.phoneNumber)
-	if err != nil {
-		timezone = "your local time" // Fallback if detection fails
-	}
+	// GetTimezoneFromPhoneNumber already handles errors and defaults to appropriate timezone
+	timezone, _ := GetTimezoneFromPhoneNumber(c.phoneNumber)
 
 	// Get current date and time in user's timezone
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
-		loc = time.UTC // Fallback to UTC
+		log.Printf("⚠️ Failed to load timezone %s, falling back to UTC: %v", timezone, err)
+		loc = time.UTC // Fallback to UTC (should rarely happen as GetTimezoneFromPhoneNumber returns valid timezones)
 	}
 	currentTime := time.Now().In(loc)
 	currentDateTimeStr := currentTime.Format("Monday, January 2, 2006 at 3:04 PM MST")
