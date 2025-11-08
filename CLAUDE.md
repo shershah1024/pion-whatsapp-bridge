@@ -76,6 +76,23 @@ curl http://localhost:3011/health
 - Duplicate message detection, media download, thread-safe processing
 - Text messages can trigger voice calls (e.g., "Call Me" button initiates outbound call)
 
+**audio_transcription.go** - Audio Message Transcription:
+- `DownloadAudio()` - Downloads audio files from WhatsApp API
+- `TranscribeAudio()` - Transcribes audio using Azure GPT-4o transcription endpoint
+- `CleanupAudioFile()` - Removes temporary audio files after processing
+- Voice messages are transcribed and processed by LLM (same as text messages)
+- Transcriptions saved to database with `[Voice]: ` prefix for context
+- Uses Azure GPT-4o model: `gpt-4o-transcribe`
+- Requires `AZURE_TRANSCRIBE_ENDPOINT` environment variable
+
+**llm_text_handler.go** - LLM Text Conversation Handler:
+- `LLMTextHandler` - Manages text conversations with AI using Azure OpenAI
+- Conversation history optimization (first 20 + last 20 messages pattern)
+- Tool calling support with 6 tools: add_task, list_tasks, update_task_status, add_reminder, list_reminders, cancel_reminder
+- Uses Azure AI Foundry Responses API (not Chat Completions API)
+- Model: gpt-5-mini with no temperature parameter
+- Saves all messages to ziggy_messages table in Supabase
+
 **audio_processor.go** - Audio processing utilities (if present)
 
 ### WebRTC Configuration Details
@@ -168,12 +185,21 @@ whatsappTrack.Write(rtpBytes)
 - `PHONE_NUMBER_ID` - WhatsApp Business phone number ID
 - `VERIFY_TOKEN` - Webhook verification token (default: "whatsapp_bridge_token")
 
-**Optional:**
-- `AZURE_OPENAI_API_KEY` - Azure OpenAI API key (enables AI voice assistant)
-- `AZURE_OPENAI_ENDPOINT` - Azure OpenAI endpoint URL
+**Optional - Voice Calling:**
+- `AZURE_OPENAI_API_KEY` - Azure OpenAI API key (enables AI voice assistant for calls)
+- `AZURE_OPENAI_ENDPOINT` - Azure OpenAI endpoint URL for Realtime API
 - `AZURE_OPENAI_DEPLOYMENT` - Azure OpenAI deployment name
 - `OPENAI_API_KEY` - OpenAI API key (alternative to Azure)
 - `ENABLE_ECHO` - Set to "true" to echo audio back to caller (testing)
+
+**Optional - Text Messaging & Audio Transcription:**
+- `AZURE_API_KEY` - Azure AI Foundry API key (fallback for AZURE_OPENAI_API_KEY, used for text LLM and transcription)
+- `AZURE_ENDPOINT` - Azure AI Foundry endpoint (fallback for AZURE_OPENAI_ENDPOINT)
+- `AZURE_TRANSCRIBE_ENDPOINT` - Azure GPT-4o transcription endpoint for audio messages
+- `SUPABASE_URL` - Supabase project URL for message history
+- `SUPABASE_ANON_KEY` - Supabase anonymous key
+
+**Other:**
 - `PORT` - Server port (default: 3011)
 
 ## API Endpoints

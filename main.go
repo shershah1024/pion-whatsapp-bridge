@@ -175,6 +175,9 @@ func (b *WhatsAppBridge) Start() {
 	// Outbound call endpoint
 	router.HandleFunc("/initiate-call", b.handleInitiateCall).Methods("POST")
 
+	// Call permission request endpoint
+	router.HandleFunc("/request-call-permission", b.handleRequestCallPermission).Methods("POST")
+
 	// Reminders cron endpoint - called by Supabase cron job
 	router.HandleFunc("/check-reminders", b.handleCheckReminders).Methods("POST", "GET")
 
@@ -633,12 +636,27 @@ func (b *WhatsAppBridge) handleInteractiveMessage(handler *WebhookHandler, selec
 	case "Help":
 		b.handleTextMessage(handler, "help", sender)
 
+	case "approve_call_permission":
+		// User approved call permission
+		log.Printf("✅ User %s approved call permission", sender)
+		if err := ApproveCallPermission(sender, "express_request"); err != nil {
+			log.Printf("❌ Failed to approve call permission: %v", err)
+			handler.ReplyText("❌ Sorry, there was an error processing your response. Please try again.")
+		} else {
+			handler.ReplyText("✅ Thank you! You've granted permission for us to call you. We can now contact you by phone when needed. This permission is valid for 72 hours.")
+		}
+
+	case "deny_call_permission":
+		// User denied call permission
+		log.Printf("🚫 User %s denied call permission", sender)
+		handler.ReplyText("👍 No problem! We won't call you. You can change your mind anytime by typing 'allow calls'.")
+
 	default:
 		handler.ReplyText("Got your selection: " + selection)
 	}
 }
 
-// handleAudioMessage handles incoming audio messages
+// handleAudioMessage handles incoming audio messages with transcription
 func (b *WhatsAppBridge) handleAudioMessage(handler *WebhookHandler, sender string) {
 	audioID := handler.AudioID()
 	if audioID == "" {
@@ -648,22 +666,70 @@ func (b *WhatsAppBridge) handleAudioMessage(handler *WebhookHandler, sender stri
 
 	log.Printf("🎤 Received audio message: %s from %s", audioID, sender)
 
+	// Get WhatsApp credentials
+	token := os.Getenv("WHATSAPP_TOKEN")
+	phoneNumberID := os.Getenv("PHONE_NUMBER_ID")
+
 	// Download the audio file
-	filename := "audio_" + audioID + ".ogg"
-	savedPath, err := handler.client.DownloadMedia(audioID, filename)
+	audioFilePath, err := DownloadAudio(audioID, phoneNumberID, token)
 	if err != nil {
 		log.Printf("❌ Error downloading audio: %v", err)
-		handler.ReplyText("Sorry, I couldn't process your audio message.")
+		handler.ReplyText("Sorry, I couldn't download your audio message. 🤔")
 		return
 	}
 
-	log.Printf("✅ Audio saved to: %s", savedPath)
-	handler.ReplyText("🎧 Thanks for the audio message! I've received it.")
+	// Ensure cleanup
+	defer CleanupAudioFile(audioFilePath)
 
-	// Here you could:
-	// 1. Transcribe the audio using OpenAI Whisper
-	// 2. Process the audio for voice commands
-	// 3. Store it in a database
+	// Transcribe the audio
+	transcription, err := TranscribeAudio(audioFilePath)
+	if err != nil {
+		log.Printf("❌ Error transcribing audio: %v", err)
+		handler.ReplyText("Sorry, I couldn't understand your audio message. Can you try again? 🎤")
+		return
+	}
+
+	if transcription == "" {
+		log.Printf("⚠️ Empty transcription result")
+		handler.ReplyText("I couldn't hear anything in your audio. Can you try again? 🎤")
+		return
+	}
+
+	log.Printf("✅ Transcribed audio: %s", transcription)
+
+	// Get message metadata
+	messageID := handler.MessageID()
+	contactName := handler.ContactName()
+
+	// Create LLM handler for this user
+	llmHandler := NewLLMTextHandler(sender)
+
+	// Save the transcribed message with [Voice] prefix
+	voiceMessage := fmt.Sprintf("[Voice]: %s", transcription)
+	if err := llmHandler.SaveMessage(voiceMessage, "inbound", messageID, contactName); err != nil {
+		log.Printf("⚠️ Failed to save voice message: %v", err)
+	}
+
+	// Get AI response for the transcribed text
+	aiResponse, err := llmHandler.GetAIResponse(transcription)
+	if err != nil {
+		log.Printf("❌ Failed to get AI response: %v", err)
+		handler.ReplyText("I'm having trouble thinking right now. Can you try again? 🤔")
+		return
+	}
+
+	// Send the AI response
+	if _, err := handler.ReplyText(aiResponse); err != nil {
+		log.Printf("❌ Failed to send response: %v", err)
+		return
+	}
+
+	// Save the outbound response
+	if err := llmHandler.SaveMessage(aiResponse, "outbound", "", contactName); err != nil {
+		log.Printf("⚠️ Failed to save outbound message: %v", err)
+	}
+
+	log.Printf("✅ Voice message processed and response sent")
 }
 
 // handleImageMessage handles incoming image messages
@@ -1553,6 +1619,50 @@ func (b *WhatsAppBridge) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (b *WhatsAppBridge) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+}
+
+// handleRequestCallPermission sends a permission request message to a user
+func (b *WhatsAppBridge) handleRequestCallPermission(w http.ResponseWriter, r *http.Request) {
+	log.Printf("📞 Received request-call-permission request from %s", r.RemoteAddr)
+
+	var req struct {
+		To string `json:"to"` // Phone number to request permission from (without +)
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("❌ Failed to decode request body: %v", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.To == "" {
+		log.Printf("❌ Phone number not provided in request")
+		http.Error(w, "Phone number required", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("📤 Requesting call permission from %s", req.To)
+
+	// Send permission request message
+	if err := SendCallPermissionRequest(req.To); err != nil {
+		if err.Error() == "rate limited" {
+			log.Printf("🚫 Rate limited: %s", req.To)
+			http.Error(w, "Rate limited. You can only send 1 request per 24 hours, 2 per 7 days.", http.StatusTooManyRequests)
+			return
+		}
+		log.Printf("❌ Failed to send permission request: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to send permission request: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "sent",
+		"message": "Call permission request sent successfully",
+		"to":      req.To,
+	})
+
+	log.Printf("✅ Successfully sent call permission request to %s", req.To)
 }
 
 // handleInitiateCall initiates an outbound call to a WhatsApp user

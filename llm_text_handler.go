@@ -87,26 +87,46 @@ func (h *LLMTextHandler) GetSystemPrompt() string {
 	currentDateTimeStr := currentTime.Format("Monday, January 2, 2006 at 3:04 PM MST")
 
 	// Same system prompt as voice assistant - consistent experience
-	return fmt.Sprintf(`You are Ziggy, a helpful voice assistant for task management and reminders.
+	return fmt.Sprintf(`You are Ziggy, a helpful assistant for task management and reminders via TEXT MESSAGE (WhatsApp).
 
-IMPORTANT: You are communicating via TEXT MESSAGE (WhatsApp), so:
-- Keep responses SHORT (2-3 sentences max)
+COMMUNICATION STYLE:
+- Keep responses SHORT (1-2 sentences max)
 - Use emojis to be friendly 😊
-- No long paragraphs
 - Be conversational and warm
+- Speak ONLY in English
 
-Greet the user warmly when they first message you. Speak ONLY in English.
+YOUR CAPABILITIES:
+1) Tasks - create, list, update tasks (stored permanently)
+2) Reminders - set reminders and I'll CALL them back at the specified time
 
-You can help with:
-1) Task management - create, list, and update tasks
-2) Reminders - set reminders and I'll call you back at the specified time
+CRITICAL RULES - READ CONVERSATION HISTORY CAREFULLY:
 
-IMPORTANT CONTEXT:
+1. FOLLOW USER INTENT - Read the conversation context:
+   - If user is setting a reminder → Call add_reminder tool immediately when you have text + time
+   - If user is creating a task → Call add_task tool immediately when you have a title
+   - Don't ask "did you mean task or reminder?" if context is clear
+
+2. MINIMIZE FOLLOW-UP QUESTIONS:
+   - For reminders: Only need reminder_text + reminder_time (both REQUIRED)
+   - For tasks: Only need title (REQUIRED). Description and priority are OPTIONAL
+   - If user says "no details needed" or "just set it" → Use what you have and call the tool NOW
+   - Don't ask for optional fields unless user explicitly wants to provide them
+
+3. BE DECISIVE AND PROACTIVE:
+   - If you have the minimum required info → Call the tool immediately
+   - Don't keep asking questions when user wants you to "just do it"
+   - Example: User says "remind me to call mom tomorrow at 3pm" → Call add_reminder IMMEDIATELY, don't ask for more details
+
+4. MULTI-TURN CONVERSATIONS:
+   - When user is clearly continuing a previous request (e.g., you asked "what to remind you about?" and they answered) → Complete the action
+   - Don't start new conversations when completing an existing one
+
+CONTEXT:
 - Current date and time: %s
 - User's timezone: %s
 - When setting reminders, convert user's time to format: YYYY-MM-DD HH:MM (24-hour format)
 
-Be friendly, concise, and proactive in your responses.`, currentDateTimeStr, timezone)
+Remember: Be helpful by DOING things quickly, not by asking endless questions!`, currentDateTimeStr, timezone)
 }
 
 // SaveMessage saves a text message to Supabase
@@ -492,6 +512,20 @@ func (h *LLMTextHandler) GetAIResponse(userMessage string) (string, error) {
 		"content": userMessage,
 	})
 
+	// Log conversation context for debugging
+	log.Printf("💭 Sending to LLM: %d history messages + current message", len(history))
+	if len(history) > 0 {
+		log.Printf("📝 Last 3 messages in history:")
+		start := len(history) - 3
+		if start < 0 {
+			start = 0
+		}
+		for i := start; i < len(history); i++ {
+			log.Printf("   [%s]: %s", history[i].Role, history[i].Content)
+		}
+	}
+	log.Printf("   [user]: %s", userMessage)
+
 	// Make initial request with tools
 	return h.makeRequestWithTools(messages)
 }
@@ -512,8 +546,8 @@ func (h *LLMTextHandler) makeRequestWithTools(input []interface{}) (string, erro
 		return "", err
 	}
 
-	log.Printf("🤖 Calling LLM API: %s", h.endpoint)
-	log.Printf("📤 Request body: %s", string(jsonData))
+	log.Printf("🤖 Calling LLM API: %s (model: gpt-5-mini, max_tokens: 3000)", h.endpoint)
+	// Only log full request body if there's an error (too verbose otherwise)
 
 	req, err := http.NewRequest("POST", h.endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -538,7 +572,8 @@ func (h *LLMTextHandler) makeRequestWithTools(input []interface{}) (string, erro
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("❌ LLM API error: Status=%s, Body=%s", resp.Status, string(body))
-		return "I'm having trouble thinking right now. Can you try again?", fmt.Errorf("API error: %s", resp.Status)
+		log.Printf("📤 Request that failed: %s", string(jsonData))
+		return "I'm having trouble thinking right now. Can you try again? 🤔", fmt.Errorf("API error: %s", resp.Status)
 	}
 
 	log.Printf("✅ LLM API response received successfully")
