@@ -652,7 +652,8 @@ func (b *WhatsAppBridge) handleInteractiveMessage(handler *WebhookHandler, selec
 		handler.ReplyText("👍 No problem! We won't call you. You can change your mind anytime by typing 'allow calls'.")
 
 	default:
-		handler.ReplyText("Got your selection: " + selection)
+		// Unknown button selection - just log it
+		log.Printf("⚠️ Unknown button selection: %s", selection)
 	}
 }
 
