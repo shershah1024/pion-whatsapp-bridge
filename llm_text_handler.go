@@ -87,7 +87,7 @@ func (h *LLMTextHandler) GetSystemPrompt() string {
 	currentDateTimeStr := currentTime.Format("Monday, January 2, 2006 at 3:04 PM MST")
 
 	// Same system prompt as voice assistant - consistent experience
-	return fmt.Sprintf(`You are Ziggy, a helpful assistant for task management and reminders via TEXT MESSAGE (WhatsApp).
+	return fmt.Sprintf(`You are Ziggy, a helpful assistant for task management, notes, and reminders via TEXT MESSAGE (WhatsApp).
 
 COMMUNICATION STYLE:
 - Keep responses SHORT (1-2 sentences max)
@@ -98,15 +98,18 @@ COMMUNICATION STYLE:
 YOUR CAPABILITIES:
 1) Tasks - create, list, update tasks (stored permanently)
 2) Reminders - set reminders and I'll CALL them back at the specified time
+3) Notes - save quick notes and information (use when user says "note that...", "write this down", "remember that...")
 
 CRITICAL RULES - READ CONVERSATION HISTORY CAREFULLY:
 
 1. FOLLOW USER INTENT - Read the conversation context:
+   - If user wants to save information → Call add_note tool immediately with the content
    - If user is setting a reminder → Call add_reminder tool immediately when you have text + time
    - If user is creating a task → Call add_task tool immediately when you have a title
-   - Don't ask "did you mean task or reminder?" if context is clear
+   - Don't ask "did you mean task/note/reminder?" if context is clear
 
 2. MINIMIZE FOLLOW-UP QUESTIONS:
+   - For notes: Only need note_content (REQUIRED). Save immediately when user provides the information
    - For reminders: Only need reminder_text + reminder_time (both REQUIRED)
    - For tasks: Only need title (REQUIRED). Description and priority are OPTIONAL
    - If user says "no details needed" or "just set it" → Use what you have and call the tool NOW
@@ -474,6 +477,69 @@ func (h *LLMTextHandler) GetTools() []map[string]interface{} {
 			},
 			"strict": true,
 		},
+		{
+			"type":        "function",
+			"name":        "add_note",
+			"description": "Create a note for the caller. Use this when they ask to note something, write something down, remember something, or save information. Examples: 'Note that...', 'Write this down', 'Remember that...'",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"note_content": map[string]interface{}{
+						"type":        "string",
+						"description": "The content of the note to save",
+					},
+				},
+				"required":             []string{"note_content"},
+				"additionalProperties": false,
+			},
+			"strict": true,
+		},
+		{
+			"type":        "function",
+			"name":        "list_notes",
+			"description": "List all notes for the caller.",
+			"parameters": map[string]interface{}{
+				"type":                 "object",
+				"properties":           map[string]interface{}{},
+				"required":             []string{},
+				"additionalProperties": false,
+			},
+			"strict": true,
+		},
+		{
+			"type":        "function",
+			"name":        "search_notes",
+			"description": "Search through the caller's notes using keywords. Use this when they want to find specific notes.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"search_query": map[string]interface{}{
+						"type":        "string",
+						"description": "Keywords to search for in notes",
+					},
+				},
+				"required":             []string{"search_query"},
+				"additionalProperties": false,
+			},
+			"strict": true,
+		},
+		{
+			"type":        "function",
+			"name":        "delete_note",
+			"description": "Delete a note. Use this when user wants to remove or delete a note.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"note_id": map[string]interface{}{
+						"type":        "string",
+						"description": "The ID of the note to delete. Get this from list_notes.",
+					},
+				},
+				"required":             []string{"note_id"},
+				"additionalProperties": false,
+			},
+			"strict": true,
+		},
 	}
 }
 
@@ -810,6 +876,82 @@ func (h *LLMTextHandler) executeFunction(name, arguments string) string {
 			"status":      "success",
 			"message":     "Reminder cancelled successfully",
 			"reminder_id": reminderID,
+		})
+		return string(result)
+
+	case "add_note":
+		noteContent, _ := args["note_content"].(string)
+
+		note, err := AddNote(noteContent, h.phoneNumber)
+		if err != nil {
+			return fmt.Sprintf(`{"status": "error", "message": "%s"}`, err.Error())
+		}
+
+		result, _ := json.Marshal(map[string]interface{}{
+			"status":  "success",
+			"message": "Note saved successfully",
+			"note_id": note.ID,
+			"content": note.NoteContent,
+		})
+		return string(result)
+
+	case "list_notes":
+		notes, err := ListNotes(h.phoneNumber, 0)
+		if err != nil {
+			return fmt.Sprintf(`{"status": "error", "message": "%s"}`, err.Error())
+		}
+
+		noteList := make([]map[string]interface{}, len(notes))
+		for i, note := range notes {
+			noteList[i] = map[string]interface{}{
+				"id":      note.ID,
+				"content": note.NoteContent,
+			}
+		}
+
+		result, _ := json.Marshal(map[string]interface{}{
+			"status": "success",
+			"count":  len(notes),
+			"notes":  noteList,
+		})
+		return string(result)
+
+	case "search_notes":
+		searchQuery, _ := args["search_query"].(string)
+
+		notes, err := SearchNotes(h.phoneNumber, searchQuery)
+		if err != nil {
+			return fmt.Sprintf(`{"status": "error", "message": "%s"}`, err.Error())
+		}
+
+		noteList := make([]map[string]interface{}, len(notes))
+		for i, note := range notes {
+			noteList[i] = map[string]interface{}{
+				"id":      note.ID,
+				"content": note.NoteContent,
+			}
+		}
+
+		result, _ := json.Marshal(map[string]interface{}{
+			"status": "success",
+			"count":  len(notes),
+			"query":  searchQuery,
+			"notes":  noteList,
+		})
+		return string(result)
+
+	case "delete_note":
+		noteID, _ := args["note_id"].(string)
+
+		err := DeleteNote(noteID)
+		if err != nil {
+			return fmt.Sprintf(`{"status": "error", "message": "%s"}`, err.Error())
+		}
+
+		result, _ := json.Marshal(map[string]interface{}{
+			"status":  "success",
+			"message": "Note deleted successfully",
+			"note_id": noteID,
 		})
 		return string(result)
 

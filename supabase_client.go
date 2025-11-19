@@ -1002,3 +1002,237 @@ func SendCallPermissionRequest(phoneNumber string) error {
 	log.Printf("📤 Sent call permission request to %s", phoneNumber)
 	return nil
 }
+
+// ZiggyNote represents a note created by the user
+type ZiggyNote struct {
+	ID          string `json:"id,omitempty"`
+	PhoneNumber string `json:"phone_number"`
+	NoteContent string `json:"note_content"`
+}
+
+// AddNote creates a new note in Supabase
+func AddNote(noteContent, phoneNumber string) (*ZiggyNote, error) {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
+
+	if supabaseURL == "" || supabaseKey == "" {
+		return nil, fmt.Errorf("Supabase credentials not configured")
+	}
+
+	note := ZiggyNote{
+		PhoneNumber: phoneNumber,
+		NoteContent: noteContent,
+	}
+
+	jsonData, err := json.Marshal(note)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/ziggy_notes", supabaseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=representation")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Supabase error: %s - %s", resp.Status, string(body))
+	}
+
+	var notes []ZiggyNote
+	if err := json.Unmarshal(body, &notes); err != nil {
+		return nil, err
+	}
+
+	if len(notes) == 0 {
+		return nil, fmt.Errorf("no note returned from Supabase")
+	}
+
+	log.Printf("✅ Note created in Supabase: %s (ID: %s)", notes[0].NoteContent, notes[0].ID)
+	return &notes[0], nil
+}
+
+// ListNotes retrieves all notes for a phone number, ordered by most recent first
+// If limit is provided and > 0, only returns that many notes
+func ListNotes(phoneNumber string, limit int) ([]ZiggyNote, error) {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
+
+	if supabaseURL == "" || supabaseKey == "" {
+		return nil, fmt.Errorf("Supabase credentials not configured")
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/ziggy_notes?phone_number=eq.%s&order=created_at.desc",
+		supabaseURL, phoneNumber)
+
+	if limit > 0 {
+		url += fmt.Sprintf("&limit=%d", limit)
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Supabase error: %s - %s", resp.Status, string(body))
+	}
+
+	var notes []ZiggyNote
+	if err := json.Unmarshal(body, &notes); err != nil {
+		return nil, err
+	}
+
+	log.Printf("📋 Retrieved %d notes from Supabase for %s", len(notes), phoneNumber)
+	return notes, nil
+}
+
+// SearchNotes searches notes for a phone number using full-text search
+func SearchNotes(phoneNumber, searchQuery string) ([]ZiggyNote, error) {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
+
+	if supabaseURL == "" || supabaseKey == "" {
+		return nil, fmt.Errorf("Supabase credentials not configured")
+	}
+
+	// Use PostgreSQL full-text search with to_tsvector and plainto_tsquery
+	// Format: note_content.fts(english).searchQuery
+	url := fmt.Sprintf("%s/rest/v1/ziggy_notes?phone_number=eq.%s&note_content=fts.%s",
+		supabaseURL, phoneNumber, searchQuery)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Supabase error: %s - %s", resp.Status, string(body))
+	}
+
+	var notes []ZiggyNote
+	if err := json.Unmarshal(body, &notes); err != nil {
+		return nil, err
+	}
+
+	log.Printf("🔍 Found %d notes matching '%s' for %s", len(notes), searchQuery, phoneNumber)
+	return notes, nil
+}
+
+// UpdateNote updates the content of an existing note
+func UpdateNote(noteID, newContent string) error {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
+
+	if supabaseURL == "" || supabaseKey == "" {
+		return fmt.Errorf("Supabase credentials not configured")
+	}
+
+	update := map[string]string{
+		"note_content": newContent,
+	}
+
+	jsonData, err := json.Marshal(update)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/ziggy_notes?id=eq.%s", supabaseURL, noteID)
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("Supabase error: %s - %s", resp.Status, string(body))
+	}
+
+	log.Printf("✅ Note %s updated", noteID)
+	return nil
+}
+
+// DeleteNote deletes a note by ID
+func DeleteNote(noteID string) error {
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
+
+	if supabaseURL == "" || supabaseKey == "" {
+		return fmt.Errorf("Supabase credentials not configured")
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/ziggy_notes?id=eq.%s", supabaseURL, noteID)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("Supabase error: %s - %s", resp.Status, string(body))
+	}
+
+	log.Printf("🗑️ Note %s deleted", noteID)
+	return nil
+}
