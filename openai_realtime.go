@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 // OpenAIRealtimeClient handles the connection to OpenAI's Realtime API
@@ -384,6 +384,10 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 	
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Printf("🧊 OpenAI ICE state: %s", state.String())
+		// v4: Handle explicit DTLS close
+		if state == webrtc.ICEConnectionStateClosed {
+			log.Printf("🔴 OpenAI: ICE connection explicitly closed via DTLS")
+		}
 	})
 	
 	// Create a data channel for Realtime API communication FIRST

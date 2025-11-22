@@ -19,7 +19,7 @@ After exploring Janus Gateway, we switched to Pion for several compelling reason
 - ✅ **ice-lite Mode** - Compatible with WhatsApp's passive ICE requirements
 - ✅ **Automatic Call Acceptance** - Pre-accept and accept calls via WhatsApp API
 - ✅ **Audio Processing Ready** - Receive and process real-time audio from callers
-- ✅ **Simple Deployment** - Single Go binary with Railway support
+- ✅ **Simple Deployment** - Single Go binary with Azure Container Apps support
 
 ## Prerequisites
 
@@ -156,41 +156,16 @@ Configure in WhatsApp Business API:
 - **Easier Debugging** - Single process, clear stack traces
 - **Modern Codebase** - Designed for programmatic use
 
-## Production Deployment - Railway
-
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https://github.com/YOUR_USERNAME/pion-whatsapp-bridge)
+## Production Deployment - Azure Container Apps
 
 ### Quick Deploy Steps:
 
-1. **Push to GitHub**:
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit: Pion WhatsApp Bridge"
-   git remote add origin https://github.com/YOUR_USERNAME/pion-whatsapp-bridge.git
-   git push -u origin main
-   ```
+See [AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md) for complete deployment guide.
 
-2. **Deploy on Railway**:
-   - Go to [railway.app](https://railway.app)
-   - Click "New Project" → "Deploy from GitHub repo"
-   - Select your repository
-   - Railway auto-detects Go and deploys
-
-3. **Get Your URL**:
-   - In Railway dashboard → Settings → Domains
-   - Click "Generate Domain"
-   - You'll get: `https://your-app.up.railway.app`
-
-4. **Configure WhatsApp**:
-   - Webhook URL: `https://your-app.up.railway.app/whatsapp-call`
-   - Verify Token: `whatsapp_bridge_token`
-
-### Why Railway?
-- ✅ **Permanent HTTPS URL** - No more changing ngrok URLs
-- ✅ **Zero Config** - Automatic Go detection and build
-- ✅ **Free Tier** - $5/month credit, perfect for testing
-- ✅ **Auto Deploy** - Push to git, auto deploys
-- ✅ **Built-in Monitoring** - Logs and metrics included
-
-See [DEPLOY.md](DEPLOY.md) for detailed instructions.
+### Why Azure Container Apps?
+- ✅ **Serverless & Auto-scaling** - Scales from 0 to 10+ replicas automatically
+- ✅ **Enterprise Security** - Azure Key Vault for secrets management
+- ✅ **Built-in Monitoring** - Application Insights for logs and metrics
+- ✅ **Cost Effective** - Pay only for what you use (~$50-70/month)
+- ✅ **High Availability** - Azure SLA with automatic failover
+- ✅ **DDoS Protection** - Cloudflare proxy integration

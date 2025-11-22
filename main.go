@@ -14,7 +14,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 const (
@@ -831,9 +831,14 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 			default:
 			}
 		}
+		// v4: Handle explicit DTLS close (instant disconnect detection)
+		if state == webrtc.ICEConnectionStateClosed {
+			log.Printf("🔴 Call %s: ICE connection explicitly closed via DTLS", callID)
+			// Connection closed gracefully - cleanup will happen in terminate handler
+		}
 	})
 	
-	pc.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
+	pc.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
 		log.Printf("ICE Gathering State for call %s: %s", callID, state.String())
 	})
 	
@@ -1501,6 +1506,10 @@ func (b *WhatsAppBridge) processIncomingSDP(offerSDP string) (string, error) {
 	// Set up handlers
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Printf("ICE Connection State: %s", state.String())
+		// v4: Handle explicit DTLS close
+		if state == webrtc.ICEConnectionStateClosed {
+			log.Printf("🔴 Test call: ICE connection explicitly closed")
+		}
 	})
 	
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
@@ -1738,6 +1747,10 @@ func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Reque
 	// Handle ICE connection state changes
 	pc.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
 		log.Printf("🧊 Outbound call ICE state: %s", connectionState.String())
+		// v4: Handle explicit DTLS close
+		if connectionState == webrtc.ICEConnectionStateClosed {
+			log.Printf("🔴 Outbound call: ICE connection explicitly closed via DTLS")
+		}
 	})
 
 	// Handle peer connection state changes
