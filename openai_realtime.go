@@ -72,7 +72,7 @@ func (c *OpenAIRealtimeClient) getInstructions() string {
 	currentDateTimeStr := currentTime.Format("Monday, January 2, 2006 at 3:04 PM MST")
 
 	// Regular call - standard instructions with timezone awareness and current date/time
-	return fmt.Sprintf("You are Ziggy, a helpful voice assistant for task management and reminders. IMMEDIATELY greet the caller when the call starts - say 'Hello! I'm Ziggy, your assistant. How can I help you today?' Speak ONLY in English. You can help with: 1) Task management - create, list, and update tasks, 2) Reminders - set reminders and I'll call you back at the specified time. IMPORTANT CONTEXT: The current date and time is %s. When setting reminders, convert user's time to format: YYYY-MM-DD HH:MM (24-hour format). The user is in timezone %s. Be friendly, concise, and proactive in your responses.", currentDateTimeStr, timezone)
+	return fmt.Sprintf("You are Ziggy, a helpful voice assistant for task management, reminders, and notes. IMMEDIATELY greet the caller when the call starts - say 'Hello! I'm Ziggy, your assistant. How can I help you today?' Speak ONLY in English. You can help with: 1) Task management - create, list, and update tasks, 2) Reminders - set reminders and I'll call you back at the specified time, 3) Notes - save quick notes and information. IMPORTANT CONTEXT: The current date and time is %s. When setting reminders, convert user's time to format: YYYY-MM-DD HH:MM (24-hour format). The user is in timezone %s. Be friendly, concise, and proactive in your responses.", currentDateTimeStr, timezone)
 }
 
 // EphemeralTokenResponse represents the response from the ephemeral token endpoint (GA)
@@ -220,6 +220,60 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 							},
 						},
 						"required": []string{"reminder_id"},
+					},
+				},
+				{
+					"type":        "function",
+					"name":        "add_note",
+					"description": "Create a note for the caller. Use this when they ask to note something, write something down, remember something, or save information.",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"note_content": map[string]interface{}{
+								"type":        "string",
+								"description": "The content of the note to save",
+							},
+						},
+						"required": []string{"note_content"},
+					},
+				},
+				{
+					"type":        "function",
+					"name":        "list_notes",
+					"description": "List all notes for the caller. Shows all saved notes in chronological order.",
+					"parameters": map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{},
+					},
+				},
+				{
+					"type":        "function",
+					"name":        "search_notes",
+					"description": "Search through notes for specific keywords or content. Use this when user wants to find specific notes.",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"query": map[string]interface{}{
+								"type":        "string",
+								"description": "Search query to find in notes",
+							},
+						},
+						"required": []string{"query"},
+					},
+				},
+				{
+					"type":        "function",
+					"name":        "delete_note",
+					"description": "Delete a specific note. Use this when user wants to remove or delete a note.",
+					"parameters": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"note_id": map[string]interface{}{
+								"type":        "string",
+								"description": "The ID of the note to delete. Get this from list_notes or search_notes.",
+							},
+						},
+						"required": []string{"note_id"},
 					},
 				},
 			},
@@ -1099,6 +1153,108 @@ func (c *OpenAIRealtimeClient) handleFunctionCall(event map[string]interface{}) 
 				"reminder_id": reminderID,
 			})
 			log.Printf("✅ Reminder %s cancelled", reminderID)
+		}
+
+	case "add_note":
+		noteContent, _ := args["note_content"].(string)
+
+		log.Printf("📝 Adding note: %s", noteContent)
+
+		note, err := AddNote(noteContent, c.phoneNumber)
+		if err != nil {
+			log.Printf("❌ Failed to add note: %v", err)
+			errorResult := map[string]string{
+				"status":  "error",
+				"message": fmt.Sprintf("Failed to save note: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
+		} else {
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status":  "success",
+				"message": "Note saved successfully",
+				"note_id": note.ID,
+				"content": note.NoteContent,
+			})
+			log.Printf("✅ Note saved (ID: %s)", note.ID)
+		}
+
+	case "list_notes":
+		log.Printf("📋 Listing notes")
+
+		notes, err := ListNotes(c.phoneNumber, 0)
+		if err != nil {
+			log.Printf("❌ Failed to list notes: %v", err)
+			errorResult := map[string]string{
+				"status":  "error",
+				"message": fmt.Sprintf("Failed to list notes: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
+		} else {
+			var noteList []map[string]interface{}
+			for _, n := range notes {
+				noteList = append(noteList, map[string]interface{}{
+					"id":      n.ID,
+					"content": n.NoteContent,
+				})
+			}
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status": "success",
+				"count":  len(notes),
+				"notes":  noteList,
+			})
+			log.Printf("✅ Retrieved %d notes", len(notes))
+		}
+
+	case "search_notes":
+		query, _ := args["query"].(string)
+
+		log.Printf("🔍 Searching notes for: %s", query)
+
+		notes, err := SearchNotes(c.phoneNumber, query)
+		if err != nil {
+			log.Printf("❌ Failed to search notes: %v", err)
+			errorResult := map[string]string{
+				"status":  "error",
+				"message": fmt.Sprintf("Failed to search notes: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
+		} else {
+			var noteList []map[string]interface{}
+			for _, n := range notes {
+				noteList = append(noteList, map[string]interface{}{
+					"id":      n.ID,
+					"content": n.NoteContent,
+				})
+			}
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status": "success",
+				"count":  len(notes),
+				"notes":  noteList,
+				"query":  query,
+			})
+			log.Printf("✅ Found %d notes matching '%s'", len(notes), query)
+		}
+
+	case "delete_note":
+		noteID, _ := args["note_id"].(string)
+
+		log.Printf("🗑️ Deleting note: %s", noteID)
+
+		err := DeleteNote(noteID)
+		if err != nil {
+			log.Printf("❌ Failed to delete note: %v", err)
+			errorResult := map[string]string{
+				"status":  "error",
+				"message": fmt.Sprintf("Failed to delete note: %v", err),
+			}
+			resultJSON, _ = json.Marshal(errorResult)
+		} else {
+			resultJSON, _ = json.Marshal(map[string]interface{}{
+				"status":  "success",
+				"message": "Note deleted successfully",
+				"note_id": noteID,
+			})
+			log.Printf("✅ Note %s deleted", noteID)
 		}
 
 	default:
