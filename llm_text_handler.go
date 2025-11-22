@@ -347,8 +347,13 @@ func (h *LLMTextHandler) fetchMessages(limit int, ascending bool) ([]ChatMessage
 	return messages, nil
 }
 
-// GetTools returns the tool definitions for Ziggy (same as voice API)
+// GetTools returns the tool definitions for Ziggy (uses shared definitions from ziggy_tools.go)
 func (h *LLMTextHandler) GetTools() []map[string]interface{} {
+	return GetZiggyTools()
+}
+
+// GetToolsOLD is the old hardcoded version - kept for reference, can be deleted
+func (h *LLMTextHandler) GetToolsOLD() []map[string]interface{} {
 	return []map[string]interface{}{
 		{
 			"type":        "function",

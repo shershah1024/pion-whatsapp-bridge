@@ -1012,12 +1012,17 @@ type ZiggyNote struct {
 
 // AddNote creates a new note in Supabase
 func AddNote(noteContent, phoneNumber string) (*ZiggyNote, error) {
+	log.Printf("🔷 [NOTES_DB] AddNote called with content='%s', phone='%s'", noteContent, phoneNumber)
+
 	supabaseURL := os.Getenv("SUPABASE_URL")
 	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
 
 	if supabaseURL == "" || supabaseKey == "" {
+		log.Printf("❌ [NOTES_DB] Supabase credentials missing")
 		return nil, fmt.Errorf("Supabase credentials not configured")
 	}
+
+	log.Printf("🔷 [NOTES_DB] Supabase URL: %s", supabaseURL)
 
 	note := ZiggyNote{
 		PhoneNumber: phoneNumber,
@@ -1026,12 +1031,18 @@ func AddNote(noteContent, phoneNumber string) (*ZiggyNote, error) {
 
 	jsonData, err := json.Marshal(note)
 	if err != nil {
+		log.Printf("❌ [NOTES_DB] JSON marshal error: %v", err)
 		return nil, err
 	}
 
+	log.Printf("🔷 [NOTES_DB] JSON payload: %s", string(jsonData))
+
 	url := fmt.Sprintf("%s/rest/v1/ziggy_notes", supabaseURL)
+	log.Printf("🔷 [NOTES_DB] POST URL: %s", url)
+
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
+		log.Printf("❌ [NOTES_DB] Request creation error: %v", err)
 		return nil, err
 	}
 
@@ -1043,26 +1054,33 @@ func AddNote(noteContent, phoneNumber string) (*ZiggyNote, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("❌ [NOTES_DB] HTTP request error: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 
+	log.Printf("🔷 [NOTES_DB] Response status: %d", resp.StatusCode)
+	log.Printf("🔷 [NOTES_DB] Response body: %s", string(body))
+
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		log.Printf("❌ [NOTES_DB] Supabase error: %s - %s", resp.Status, string(body))
 		return nil, fmt.Errorf("Supabase error: %s - %s", resp.Status, string(body))
 	}
 
 	var notes []ZiggyNote
 	if err := json.Unmarshal(body, &notes); err != nil {
+		log.Printf("❌ [NOTES_DB] JSON unmarshal error: %v", err)
 		return nil, err
 	}
 
 	if len(notes) == 0 {
+		log.Printf("❌ [NOTES_DB] No note returned from Supabase")
 		return nil, fmt.Errorf("no note returned from Supabase")
 	}
 
-	log.Printf("✅ Note created in Supabase: %s (ID: %s)", notes[0].NoteContent, notes[0].ID)
+	log.Printf("✅ [NOTES_DB] Note created in Supabase: %s (ID: %s)", notes[0].NoteContent, notes[0].ID)
 	return &notes[0], nil
 }
 

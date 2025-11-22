@@ -5,7 +5,8 @@
 CREATE TABLE IF NOT EXISTS public.ziggy_notes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     phone_number TEXT NOT NULL,
-    note_content TEXT NOT NULL
+    note_content TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
 );
 
 -- Create indexes for efficient queries
@@ -47,3 +48,4 @@ CREATE POLICY "Allow anon users to delete ziggy_notes"
 COMMENT ON TABLE public.ziggy_notes IS 'Stores notes created by users via Ziggy assistant';
 COMMENT ON COLUMN public.ziggy_notes.phone_number IS 'User phone number in international format';
 COMMENT ON COLUMN public.ziggy_notes.note_content IS 'The actual note text content';
+COMMENT ON COLUMN public.ziggy_notes.created_at IS 'Timestamp when the note was created';

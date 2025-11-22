@@ -108,7 +108,8 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 			"input_audio_transcription": map[string]interface{}{
 				"model": "whisper-1",
 			},
-			"tools": []map[string]interface{}{
+			"tools": GetZiggyTools(), // Use shared tool definitions from ziggy_tools.go
+			"tools_OLD_HARDCODED": []map[string]interface{}{
 				{
 					"type":        "function",
 					"name":        "add_task",
@@ -959,14 +960,15 @@ func (c *OpenAIRealtimeClient) TriggerResponse(text string) error {
 
 // handleFunctionCall processes function call requests from OpenAI
 func (c *OpenAIRealtimeClient) handleFunctionCall(event map[string]interface{}) {
-	log.Printf("🔧 Function call event: %+v", event)
-	
+	log.Printf("🔧 [FUNCTION_CALL] Event received: %+v", event)
+
 	// Extract function name and arguments
 	functionName, _ := event["name"].(string)
 	arguments, _ := event["arguments"].(string)
 	callID, _ := event["call_id"].(string)
-	
-	log.Printf("📞 Function call: %s with args: %s", functionName, arguments)
+
+	log.Printf("📞 [FUNCTION_CALL] Function=%s, CallID=%s", functionName, callID)
+	log.Printf("📞 [FUNCTION_CALL] Arguments string: %s", arguments)
 	
 	// Parse arguments
 	var args map[string]interface{}
@@ -1158,11 +1160,14 @@ func (c *OpenAIRealtimeClient) handleFunctionCall(event map[string]interface{}) 
 	case "add_note":
 		noteContent, _ := args["note_content"].(string)
 
-		log.Printf("📝 Adding note: %s", noteContent)
+		log.Printf("📝 [NOTES] Function called: add_note")
+		log.Printf("📝 [NOTES] Phone number: %s", c.phoneNumber)
+		log.Printf("📝 [NOTES] Note content: %s", noteContent)
+		log.Printf("📝 [NOTES] Args received: %+v", args)
 
 		note, err := AddNote(noteContent, c.phoneNumber)
 		if err != nil {
-			log.Printf("❌ Failed to add note: %v", err)
+			log.Printf("❌ [NOTES] Failed to add note: %v", err)
 			errorResult := map[string]string{
 				"status":  "error",
 				"message": fmt.Sprintf("Failed to save note: %v", err),
@@ -1175,7 +1180,7 @@ func (c *OpenAIRealtimeClient) handleFunctionCall(event map[string]interface{}) 
 				"note_id": note.ID,
 				"content": note.NoteContent,
 			})
-			log.Printf("✅ Note saved (ID: %s)", note.ID)
+			log.Printf("✅ [NOTES] Note saved successfully (ID: %s)", note.ID)
 		}
 
 	case "list_notes":
