@@ -108,8 +108,8 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 			"input_audio_transcription": map[string]interface{}{
 				"model": "whisper-1",
 			},
-			"tools": GetZiggyTools(), // Use shared tool definitions from ziggy_tools.go
-			"tools_OLD_HARDCODED": []map[string]interface{}{
+			"tools": []map[string]interface{}{
+				// Tasks
 				{
 					"type":        "function",
 					"name":        "add_task",
@@ -169,6 +169,7 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 						"required": []string{"task_id", "status"},
 					},
 				},
+				// Reminders
 				{
 					"type":        "function",
 					"name":        "add_reminder",
@@ -223,6 +224,7 @@ func (c *OpenAIRealtimeClient) GetEphemeralToken() error {
 						"required": []string{"reminder_id"},
 					},
 				},
+				// Notes
 				{
 					"type":        "function",
 					"name":        "add_note",
@@ -640,6 +642,61 @@ func (c *OpenAIRealtimeClient) ConnectToRealtimeAPI(api *webrtc.API) error {
 							"required": []string{"reminder_id"},
 						},
 					},
+					// Notes
+					{
+						"type": "function",
+						"name": "add_note",
+						"description": "Create a note for the caller. Use this when they ask to note something, write something down, remember something, or save information.",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"note_content": map[string]interface{}{
+									"type": "string",
+									"description": "The content of the note to save",
+								},
+							},
+							"required": []string{"note_content"},
+						},
+					},
+					{
+						"type": "function",
+						"name": "list_notes",
+						"description": "List all notes for the caller. Shows all saved notes in chronological order.",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{},
+						},
+					},
+					{
+						"type": "function",
+						"name": "search_notes",
+						"description": "Search through notes for specific keywords or content. Use this when user wants to find specific notes.",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"query": map[string]interface{}{
+									"type": "string",
+									"description": "Search query to find in notes",
+								},
+							},
+							"required": []string{"query"},
+						},
+					},
+					{
+						"type": "function",
+						"name": "delete_note",
+						"description": "Delete a specific note. Use this when user wants to remove or delete a note.",
+						"parameters": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"note_id": map[string]interface{}{
+									"type": "string",
+									"description": "The ID of the note to delete. Get this from list_notes or search_notes.",
+								},
+							},
+							"required": []string{"note_id"},
+						},
+					},
 				},
 				"tool_choice": "auto",
 				"temperature": 1.0,
@@ -960,7 +1017,7 @@ func (c *OpenAIRealtimeClient) TriggerResponse(text string) error {
 
 // handleFunctionCall processes function call requests from OpenAI
 func (c *OpenAIRealtimeClient) handleFunctionCall(event map[string]interface{}) {
-	log.Printf("🔧 [FUNCTION_CALL] Event received: %+v", event)
+	log.Printf("🔧 [FUNCTION_CALL] Full event: %+v", event)
 
 	// Extract function name and arguments
 	functionName, _ := event["name"].(string)
@@ -1160,28 +1217,32 @@ func (c *OpenAIRealtimeClient) handleFunctionCall(event map[string]interface{}) 
 	case "add_note":
 		noteContent, _ := args["note_content"].(string)
 
-		log.Printf("📝 [NOTES] Function called: add_note")
+		log.Printf("📝 [NOTES] ========== ADD_NOTE FUNCTION CALLED ==========")
 		log.Printf("📝 [NOTES] Phone number: %s", c.phoneNumber)
 		log.Printf("📝 [NOTES] Note content: %s", noteContent)
-		log.Printf("📝 [NOTES] Args received: %+v", args)
+		log.Printf("📝 [NOTES] Full args: %+v", args)
+		log.Printf("📝 [NOTES] Calling AddNote() now...")
 
 		note, err := AddNote(noteContent, c.phoneNumber)
 		if err != nil {
-			log.Printf("❌ [NOTES] Failed to add note: %v", err)
+			log.Printf("❌ [NOTES] AddNote() returned error: %v", err)
 			errorResult := map[string]string{
 				"status":  "error",
 				"message": fmt.Sprintf("Failed to save note: %v", err),
 			}
 			resultJSON, _ = json.Marshal(errorResult)
 		} else {
+			log.Printf("✅ [NOTES] AddNote() returned success!")
+			log.Printf("✅ [NOTES] Note ID: %s", note.ID)
+			log.Printf("✅ [NOTES] Note content: %s", note.NoteContent)
 			resultJSON, _ = json.Marshal(map[string]interface{}{
 				"status":  "success",
 				"message": "Note saved successfully",
 				"note_id": note.ID,
 				"content": note.NoteContent,
 			})
-			log.Printf("✅ [NOTES] Note saved successfully (ID: %s)", note.ID)
 		}
+		log.Printf("📝 [NOTES] Function result JSON: %s", string(resultJSON))
 
 	case "list_notes":
 		log.Printf("📋 Listing notes")

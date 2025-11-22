@@ -1012,29 +1012,32 @@ type ZiggyNote struct {
 
 // AddNote creates a new note in Supabase
 func AddNote(noteContent, phoneNumber string) (*ZiggyNote, error) {
-	log.Printf("🔷 [NOTES_DB] AddNote called with content='%s', phone='%s'", noteContent, phoneNumber)
+	log.Printf("🔷 [NOTES_DB] ========== AddNote() ENTERED ==========")
+	log.Printf("🔷 [NOTES_DB] Input - noteContent: '%s'", noteContent)
+	log.Printf("🔷 [NOTES_DB] Input - phoneNumber: '%s'", phoneNumber)
 
 	supabaseURL := os.Getenv("SUPABASE_URL")
 	supabaseKey := os.Getenv("SUPABASE_ANON_KEY")
 
+	log.Printf("🔷 [NOTES_DB] Supabase URL: %s", supabaseURL)
+	log.Printf("🔷 [NOTES_DB] Supabase Key (first 20 chars): %.20s...", supabaseKey)
+
 	if supabaseURL == "" || supabaseKey == "" {
-		log.Printf("❌ [NOTES_DB] Supabase credentials missing")
+		log.Printf("❌ [NOTES_DB] ERROR: Supabase credentials not configured!")
 		return nil, fmt.Errorf("Supabase credentials not configured")
 	}
-
-	log.Printf("🔷 [NOTES_DB] Supabase URL: %s", supabaseURL)
 
 	note := ZiggyNote{
 		PhoneNumber: phoneNumber,
 		NoteContent: noteContent,
 	}
+	log.Printf("🔷 [NOTES_DB] Created ZiggyNote struct: %+v", note)
 
 	jsonData, err := json.Marshal(note)
 	if err != nil {
-		log.Printf("❌ [NOTES_DB] JSON marshal error: %v", err)
+		log.Printf("❌ [NOTES_DB] ERROR: JSON Marshal failed: %v", err)
 		return nil, err
 	}
-
 	log.Printf("🔷 [NOTES_DB] JSON payload: %s", string(jsonData))
 
 	url := fmt.Sprintf("%s/rest/v1/ziggy_notes", supabaseURL)
@@ -1042,7 +1045,7 @@ func AddNote(noteContent, phoneNumber string) (*ZiggyNote, error) {
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
-		log.Printf("❌ [NOTES_DB] Request creation error: %v", err)
+		log.Printf("❌ [NOTES_DB] ERROR: Failed to create HTTP request: %v", err)
 		return nil, err
 	}
 
@@ -1050,37 +1053,43 @@ func AddNote(noteContent, phoneNumber string) (*ZiggyNote, error) {
 	req.Header.Set("Authorization", "Bearer "+supabaseKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Prefer", "return=representation")
+	log.Printf("🔷 [NOTES_DB] HTTP headers set")
 
 	client := &http.Client{Timeout: 10 * time.Second}
+	log.Printf("🔷 [NOTES_DB] Sending HTTP POST request...")
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("❌ [NOTES_DB] HTTP request error: %v", err)
+		log.Printf("❌ [NOTES_DB] ERROR: HTTP request failed: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-
-	log.Printf("🔷 [NOTES_DB] Response status: %d", resp.StatusCode)
-	log.Printf("🔷 [NOTES_DB] Response body: %s", string(body))
+	log.Printf("🔷 [NOTES_DB] Response Status Code: %d", resp.StatusCode)
+	log.Printf("🔷 [NOTES_DB] Response Status: %s", resp.Status)
+	log.Printf("🔷 [NOTES_DB] Response Body: %s", string(body))
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		log.Printf("❌ [NOTES_DB] Supabase error: %s - %s", resp.Status, string(body))
+		log.Printf("❌ [NOTES_DB] ERROR: Supabase returned error status")
 		return nil, fmt.Errorf("Supabase error: %s - %s", resp.Status, string(body))
 	}
 
 	var notes []ZiggyNote
 	if err := json.Unmarshal(body, &notes); err != nil {
-		log.Printf("❌ [NOTES_DB] JSON unmarshal error: %v", err)
+		log.Printf("❌ [NOTES_DB] ERROR: Failed to unmarshal response: %v", err)
 		return nil, err
 	}
+	log.Printf("🔷 [NOTES_DB] Unmarshaled %d notes from response", len(notes))
 
 	if len(notes) == 0 {
-		log.Printf("❌ [NOTES_DB] No note returned from Supabase")
+		log.Printf("❌ [NOTES_DB] ERROR: No note returned from Supabase")
 		return nil, fmt.Errorf("no note returned from Supabase")
 	}
 
-	log.Printf("✅ [NOTES_DB] Note created in Supabase: %s (ID: %s)", notes[0].NoteContent, notes[0].ID)
+	log.Printf("✅ [NOTES_DB] SUCCESS! Note created in Supabase")
+	log.Printf("✅ [NOTES_DB] Note ID: %s", notes[0].ID)
+	log.Printf("✅ [NOTES_DB] Note Content: %s", notes[0].NoteContent)
+	log.Printf("✅ [NOTES_DB] Note Phone: %s", notes[0].PhoneNumber)
 	return &notes[0], nil
 }
 
