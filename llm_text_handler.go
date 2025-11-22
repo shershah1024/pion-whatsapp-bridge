@@ -347,9 +347,11 @@ func (h *LLMTextHandler) fetchMessages(limit int, ascending bool) ([]ChatMessage
 	return messages, nil
 }
 
-// GetTools returns the tool definitions for Ziggy (uses shared definitions from ziggy_tools.go)
+// GetTools returns the tool definitions for Ziggy
+// Note: Cannot use GetZiggyTools() because Azure AI Foundry with strict:true requires
+// different schema format (nullable types) than OpenAI Realtime API
 func (h *LLMTextHandler) GetTools() []map[string]interface{} {
-	return GetZiggyTools()
+	return h.GetToolsOLD() // Use Azure-compatible format
 }
 
 // GetToolsOLD is the old hardcoded version - kept for reference, can be deleted

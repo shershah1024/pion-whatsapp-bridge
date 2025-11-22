@@ -34,9 +34,9 @@ func GetZiggyTools() []map[string]interface{} {
 					},
 				},
 				"required":             []string{"title"},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 		{
 			"type":        "function",
@@ -51,9 +51,9 @@ func GetZiggyTools() []map[string]interface{} {
 						"enum":        []string{"pending", "in_progress", "completed", "cancelled"},
 					},
 				},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 		{
 			"type":        "function",
@@ -73,9 +73,9 @@ func GetZiggyTools() []map[string]interface{} {
 					},
 				},
 				"required":             []string{"task_id", "status"},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 
 		// ============================================
@@ -103,9 +103,9 @@ func GetZiggyTools() []map[string]interface{} {
 					},
 				},
 				"required":             []string{"reminder_text", "reminder_time"},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 		{
 			"type":        "function",
@@ -120,9 +120,9 @@ func GetZiggyTools() []map[string]interface{} {
 						"enum":        []string{"pending", "called", "completed", "cancelled"},
 					},
 				},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 		{
 			"type":        "function",
@@ -137,9 +137,9 @@ func GetZiggyTools() []map[string]interface{} {
 					},
 				},
 				"required":             []string{"reminder_id"},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 
 		// ============================================
@@ -158,9 +158,9 @@ func GetZiggyTools() []map[string]interface{} {
 					},
 				},
 				"required":             []string{"note_content"},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 		{
 			"type":        "function",
@@ -169,9 +169,9 @@ func GetZiggyTools() []map[string]interface{} {
 			"parameters": map[string]interface{}{
 				"type":                 "object",
 				"properties":           map[string]interface{}{},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 		{
 			"type":        "function",
@@ -186,9 +186,9 @@ func GetZiggyTools() []map[string]interface{} {
 					},
 				},
 				"required":             []string{"search_query"},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 		{
 			"type":        "function",
@@ -203,9 +203,9 @@ func GetZiggyTools() []map[string]interface{} {
 					},
 				},
 				"required":             []string{"note_id"},
-				"additionalProperties": false,
+				
 			},
-			"strict": true,
+			
 		},
 	}
 }

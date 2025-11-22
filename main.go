@@ -216,14 +216,14 @@ func (b *WhatsAppBridge) handleWebhookVerification(w http.ResponseWriter, r *htt
 	mode := r.URL.Query().Get("hub.mode")
 	token := r.URL.Query().Get("hub.verify_token")
 	challenge := r.URL.Query().Get("hub.challenge")
-	
+
 	if mode == "subscribe" && token == b.verifyToken {
 		log.Println("✅ WhatsApp webhook verified")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(challenge))
 		return
 	}
-	
+
 	log.Println("❌ WhatsApp webhook verification failed")
 	w.WriteHeader(http.StatusForbidden)
 	json.NewEncoder(w).Encode(map[string]string{"error": "Verification failed"})

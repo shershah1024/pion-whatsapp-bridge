@@ -62,3 +62,16 @@ lsof -ti:3011 | xargs kill -9
 # Kill cloudflared
 pkill cloudflared
 ```
+https://whatsapp-bridge.agreeablehill-44d96eb3.eastus.azurecontainerapps.io/whatsapp-call
+
+ https://whatsapp-bridge.tslfiles.org/whatsapp-call
+
+## Webhook URLs
+- **Production**: https://whatsapp-bridge.tslfiles.org/whatsapp-call
+- **Azure**: https://whatsapp-bridge.agreeablehill-44d96eb3.eastus.azurecontainerapps.io/whatsapp-call
+
+
+cloudflared tunnel --config /Users/imaginedemo/projects/whatsapp-call-research/pion-whatsapp-bridge/cloudflared-config.yml run
+  fbc9f22a-6dac-4be1-8f61-48c9dac102f3 &
+
+  
