@@ -878,21 +878,33 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 		
 		// Start reading audio packets and dynamically check for OpenAI client
 		go func() {
-			buf := make([]byte, 1400)
 			packetCount := 0
 			totalBytes := 0
 			openAIForwardingStarted := false
-			
+
 			for {
-				n, _, readErr := track.Read(buf)
+				// v4 FIX: Use ReadRTP() to access full packet with headers
+				rtpPacket, _, readErr := track.ReadRTP()
 				if readErr != nil {
 					log.Printf("❌ Error reading audio after %d packets: %v", packetCount, readErr)
 					return
 				}
-				
+
+				// v4 FIX: Clear extension headers to avoid conflicts between WhatsApp and OpenAI
+				// Different endpoints use different extension header IDs, causing audio corruption
+				rtpPacket.Extension = false
+				rtpPacket.Extensions = nil
+
+				// Marshal back to bytes for forwarding
+				rtpBytes, marshalErr := rtpPacket.Marshal()
+				if marshalErr != nil {
+					log.Printf("❌ Error marshaling RTP packet: %v", marshalErr)
+					continue
+				}
+
 				packetCount++
-				totalBytes += n
-				
+				totalBytes += len(rtpBytes)
+
 				// Check for OpenAI client on every packet (it might become available later)
 				b.mu.Lock()
 				activeCall, exists := b.activeCalls[callID]
@@ -901,31 +913,31 @@ func (b *WhatsAppBridge) acceptIncomingCall(callID, sdpOffer, callerNumber strin
 					openAIClient = activeCall.OpenAIClient
 				}
 				b.mu.Unlock()
-				
+
 				if openAIClient != nil {
 					// OpenAI client is available - forward the packet
 					if !openAIForwardingStarted {
 						log.Printf("🔄 OpenAI client now available - starting WhatsApp->OpenAI forwarding")
 						openAIForwardingStarted = true
 					}
-					
-					// Forward RTP packet directly to OpenAI
-					if err := openAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
+
+					// Forward cleaned RTP packet to OpenAI
+					if err := openAIClient.ForwardRTPToOpenAI(rtpBytes); err != nil {
 						if packetCount <= 3 { // Only log first few errors
 							log.Printf("❌ Error forwarding RTP to OpenAI: %v", err)
 						}
 					} else if packetCount == 1 || packetCount%100 == 0 {
 						if packetCount == 1 {
-							log.Printf("✅ First WhatsApp RTP packet forwarded to OpenAI!")
+							log.Printf("✅ First WhatsApp RTP packet forwarded to OpenAI! (cleaned headers)")
 						} else {
-							log.Printf("📦 Forwarded %d WhatsApp RTP packets (%d KB) to OpenAI", 
+							log.Printf("📦 Forwarded %d WhatsApp RTP packets (%d KB) to OpenAI",
 								packetCount, totalBytes/1024)
 						}
 					}
 				} else {
 					// OpenAI client not ready yet - just count packets
 					if packetCount%100 == 0 {
-						log.Printf("🎤 Received %d audio packets (total: %d bytes, last packet: %d bytes) - waiting for OpenAI", packetCount, totalBytes, n)
+						log.Printf("🎤 Received %d audio packets (total: %d bytes) - waiting for OpenAI", packetCount, totalBytes)
 					}
 				}
 			}
@@ -1388,6 +1400,11 @@ func (b *WhatsAppBridge) connectToOpenAIRealtime(callID string, whatsappPC *webr
 				return
 			}
 
+			// v4 FIX: Clear extension headers before forwarding to WhatsApp
+			// Prevents conflicts with WhatsApp's extension header IDs
+			rtpPacket.Extension = false
+			rtpPacket.Extensions = nil
+
 			// Log first few packets for debugging
 			if packetCount < 3 {
 				log.Printf("🔍 OpenAI RTP packet %d: PayloadType=%d, SequenceNumber=%d, Timestamp=%d, PayloadSize=%d",
@@ -1838,20 +1855,31 @@ func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Reque
 
 		// Forward audio to OpenAI when connected
 		go func() {
-			buf := make([]byte, 1400)
 			packetCount := 0
 			totalBytes := 0
 			openAIForwardingStarted := false
 
 			for {
-				n, _, readErr := track.Read(buf)
+				// v4 FIX: Use ReadRTP() to access full packet with headers
+				rtpPacket, _, readErr := track.ReadRTP()
 				if readErr != nil {
 					log.Printf("❌ Error reading audio from outbound call after %d packets: %v", packetCount, readErr)
 					return
 				}
 
+				// v4 FIX: Clear extension headers to avoid conflicts between WhatsApp and OpenAI
+				rtpPacket.Extension = false
+				rtpPacket.Extensions = nil
+
+				// Marshal back to bytes for forwarding
+				rtpBytes, marshalErr := rtpPacket.Marshal()
+				if marshalErr != nil {
+					log.Printf("❌ Error marshaling outbound call RTP packet: %v", marshalErr)
+					continue
+				}
+
 				packetCount++
-				totalBytes += n
+				totalBytes += len(rtpBytes)
 
 				// Check for OpenAI client on every packet (it becomes available after answer is received)
 				b.mu.Lock()
@@ -1869,14 +1897,14 @@ func (b *WhatsAppBridge) handleInitiateCall(w http.ResponseWriter, r *http.Reque
 						openAIForwardingStarted = true
 					}
 
-					// Forward RTP packet to OpenAI
-					if err := openAIClient.ForwardRTPToOpenAI(buf[:n]); err != nil {
+					// Forward cleaned RTP packet to OpenAI
+					if err := openAIClient.ForwardRTPToOpenAI(rtpBytes); err != nil {
 						if packetCount <= 3 {
 							log.Printf("❌ Error forwarding outbound call RTP to OpenAI: %v", err)
 						}
 					} else if packetCount == 1 || packetCount%100 == 0 {
 						if packetCount == 1 {
-							log.Printf("✅ First outbound call RTP packet forwarded to OpenAI!")
+							log.Printf("✅ First outbound call RTP packet forwarded to OpenAI! (cleaned headers)")
 						} else {
 							log.Printf("📦 Forwarded %d outbound call RTP packets (%d KB) to OpenAI",
 								packetCount, totalBytes/1024)
