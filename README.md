@@ -1,171 +1,70 @@
 # Pion WhatsApp Bridge
 
-A pure Go implementation for handling WhatsApp voice calls using Pion WebRTC. This bridge receives WhatsApp call webhooks, negotiates WebRTC connections, and enables real-time voice communication with WhatsApp users.
+Turn a WhatsApp Business number into a real-time voice endpoint that you can fully control from Go – or plug straight into OpenAI Realtime to get an AI agent that answers WhatsApp calls.
 
-## Why Pion?
+Behind the scenes it:
 
-After exploring Janus Gateway, we switched to Pion for several compelling reasons:
+- Receives WhatsApp voice call webhooks
+- Negotiates a WebRTC call using Pion
+- Bridges the audio to your logic (or OpenAI Realtime)
+- Sends audio back to the caller in real time
 
-1. **Native ice-lite Support** - Built-in support for WhatsApp's passive ICE mode
-2. **Pure Go** - Single binary deployment, no C dependencies
-3. **Direct Control** - Full programmatic control over SDP and RTP
-4. **Simpler Architecture** - No plugin system needed
-5. **Better for Custom Protocols** - Perfect for non-standard WebRTC implementations
+---
 
-## Features
+## What you can use it for
 
-- ✅ **Real WhatsApp Voice Calls** - Handle actual voice calls from WhatsApp users
-- ✅ **WebRTC Integration** - Full WebRTC peer connection with WhatsApp
-- ✅ **ice-lite Mode** - Compatible with WhatsApp's passive ICE requirements
-- ✅ **Automatic Call Acceptance** - Pre-accept and accept calls via WhatsApp API
-- ✅ **Audio Processing Ready** - Receive and process real-time audio from callers
-- ✅ **Simple Deployment** - Single Go binary with Azure Container Apps support
+- **AI phone agent on WhatsApp**  
+  Pipe the call into OpenAI Realtime: transcribe, reason, and respond with natural voice.
 
-## Prerequisites
+- **Programmable call flows**  
+  Build IVRs, bots, or custom logic in Go while still using WhatsApp’s calling UI.
 
-1. **Go** (1.21 or later)
+- **Audio-first experiments**  
+  Capture raw audio from real users on WhatsApp without touching Twilio/SIP stacks.
+
+---
+
+## What makes it different
+
+- **Pure Go, single binary**  
+  No external media server, no plugin system – just `go build` and run.
+
+- **Designed specifically for WhatsApp calling**  
+  Uses Pion with native `ice-lite` and SDP control to match WhatsApp’s non-standard WebRTC behavior.
+
+- **First-class AI bridge**  
+  Built to maintain *two* live WebRTC legs:  
+  WhatsApp ↔ Pion ↔ OpenAI Realtime, with data channels and audio forwarding already wired in.
+
+- **Deployment friendly**  
+  Works as a normal HTTP service; scripts and docs included for tunneling (ngrok) and container deployment (Azure, etc.).
+
+---
+
+## How it works (high level)
+
+1. A user calls your WhatsApp Business number.
+2. WhatsApp sends a webhook with the call event + SDP offer.
+3. The bridge uses Pion to create a WebRTC peer connection and SDP answer.
+4. It calls the WhatsApp API to accept the call with that answer.
+5. Media flows over WebRTC:
+   - Inbound: caller → Pion (→ optional AI / processing)
+   - Outbound: your audio / AI audio → caller
+6. If `OPENAI_API_KEY` is set, audio is streamed to OpenAI Realtime and responses are spoken back automatically.
+
+---
+
+## Quick start
+
+1. Clone the repo and set environment variables:
+
+   - `WHATSAPP_TOKEN` – WhatsApp access token  
+   - `PHONE_NUMBER_ID` – WhatsApp phone number ID  
+   - `VERIFY_TOKEN` – webhook verification token  
+   - `OPENAI_API_KEY` – (optional) enables AI assistant  
+   - `PORT` – HTTP port (default `3000`)
+
+2. Run the deployment script:
+
    ```bash
-   # macOS
-   brew install go
-   
-   # Or download from https://golang.org/dl/
-   ```
-
-2. **ngrok** (for public tunnel)
-   ```bash
-   # macOS
-   brew install ngrok
-   
-   # Or download from https://ngrok.com/
-   ```
-
-## Quick Start
-
-```bash
-# Deploy the complete system
-./deploy.sh
-```
-
-This will:
-1. Build the Go application
-2. Start the Pion WebRTC bridge
-3. Create a public ngrok tunnel
-4. Provide WhatsApp configuration details
-
-## Architecture
-
-```
-WhatsApp Call → Internet → ngrok → Pion Bridge → WebRTC Processing
-                                        ↓
-                                 Audio Detection
-                                        ↓
-                                  OK Response
-```
-
-## How It Works
-
-1. **User Calls Business** - WhatsApp user initiates a voice call to your business number
-2. **Webhook Notification** - WhatsApp sends webhook with call event and SDP offer
-3. **WebRTC Negotiation** - Bridge creates peer connection and SDP answer
-4. **API Response** - Bridge calls WhatsApp API to accept call with SDP answer
-5. **Media Connection** - WebRTC connection established for real-time audio
-6. **Audio Processing** - Receive audio packets from caller (ready for AI/processing)
-
-## API Endpoints
-
-- `GET /whatsapp-call` - Webhook verification
-- `POST /whatsapp-call` - Webhook events
-- `POST /test-call` - Test endpoint with SDP support
-- `GET /status` - Bridge status
-- `GET /health` - Health check
-
-## Configuration
-
-Environment variables:
-- `WHATSAPP_TOKEN` - WhatsApp access token
-- `PHONE_NUMBER_ID` - WhatsApp phone number ID
-- `VERIFY_TOKEN` - Webhook verification token
-- `OPENAI_API_KEY` - OpenAI API key (optional, enables AI voice assistant)
-- `ENABLE_ECHO` - Set to "true" to echo audio back to caller (for testing)
-- `PORT` - Server port (default: 3000)
-
-## OpenAI Realtime API Integration
-
-When `OPENAI_API_KEY` is set, the bridge automatically connects WhatsApp voice calls to OpenAI's Realtime API, creating an AI voice assistant that can:
-
-1. **Listen** to the caller's voice
-2. **Understand** using Whisper transcription
-3. **Respond** with natural voice using GPT-4
-4. **Interact** in real-time with low latency
-
-### How it Works:
-
-```
-WhatsApp Caller → Voice Audio → Bridge → OpenAI Realtime API
-                                   ↑            ↓
-                              WebRTC Connection  AI Response
-                                   ←            ←
-```
-
-The integration uses:
-- **Dual WebRTC Connections**: One to WhatsApp, one to OpenAI
-- **Data Channels**: For sending Realtime API events
-- **Audio Forwarding**: Caller's voice to AI, AI's response to caller
-
-## Testing
-
-```bash
-# Test webhook verification
-curl 'https://your-url.ngrok.io/whatsapp-call?hub.mode=subscribe&hub.verify_token=whatsapp_bridge_token&hub.challenge=test123'
-
-# Test with SDP
-curl -X POST 'https://your-url.ngrok.io/test-call' \
-  -H 'Content-Type: application/json' \
-  -d '{"sdp":"v=0\no=whatsapp 0 0 IN IP4 192.168.1.100\ns=Test\nc=IN IP4 192.168.1.100\nt=0 0\nm=audio 12345 RTP/AVP 8\na=rtpmap:8 PCMA/8000\na=sendrecv"}'
-```
-
-## WhatsApp Integration
-
-Configure in WhatsApp Business API:
-- **Webhook URL**: `https://your-url.ngrok.io/whatsapp-call`
-- **Verify Token**: `whatsapp_bridge_token`
-- **Webhook Fields**: Select voice/call events
-
-## Code Structure
-
-- `main.go` - Complete implementation including:
-  - WebRTC setup with ice-lite
-  - WhatsApp webhook handlers
-  - SDP negotiation
-  - Audio track handling
-  - HTTP server
-
-## Next Steps
-
-1. Configure webhook in WhatsApp Business API
-2. Test with actual WhatsApp calls
-3. Add OpenAI Realtime API for AI responses
-4. Deploy with proper domain and SSL
-
-## Advantages Over Janus
-
-- **No Build Complexity** - Just `go build`, no C dependencies
-- **Native ice-lite** - Built into Pion, not a configuration option
-- **Direct Go Code** - No plugin architecture to navigate
-- **Better Error Handling** - Go's error handling vs C callbacks
-- **Easier Debugging** - Single process, clear stack traces
-- **Modern Codebase** - Designed for programmatic use
-
-## Production Deployment - Azure Container Apps
-
-### Quick Deploy Steps:
-
-See [AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md) for complete deployment guide.
-
-### Why Azure Container Apps?
-- ✅ **Serverless & Auto-scaling** - Scales from 0 to 10+ replicas automatically
-- ✅ **Enterprise Security** - Azure Key Vault for secrets management
-- ✅ **Built-in Monitoring** - Application Insights for logs and metrics
-- ✅ **Cost Effective** - Pay only for what you use (~$50-70/month)
-- ✅ **High Availability** - Azure SLA with automatic failover
-- ✅ **DDoS Protection** - Cloudflare proxy integration
+   ./deploy.sh
